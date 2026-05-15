@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import "fake-indexeddb/auto";
 import { DbClient } from "../../packages/db/src/db-client.js";
-import type { ZerithDBConfig } from "../../packages/core/src/index.js";
+import { ErrorCode, type ZerithDBConfig } from "../../packages/core/src/index.js";
 
 describe("DbClient — CollectionClient", () => {
   let db: DbClient;
@@ -171,6 +171,17 @@ describe("DbClient — CollectionClient", () => {
       await col.insertMany([{ x: 1 }, { x: 2 }, { x: 3 }]);
       expect(await col.count()).toBe(3);
       expect(await col.count({ x: { $gt: 1 } })).toBe(2);
+    });
+  });
+
+  describe("createIndex()", () => {
+    it("should require a comparator for non-primitive field values", async () => {
+      const col = db.collection<{ meta: { rank: number } }>("meta");
+      await col.insert({ meta: { rank: 1 } });
+
+      await expect(
+        col.createIndex({ name: "meta_idx", field: "meta" })
+      ).rejects.toMatchObject({ code: ErrorCode.SDK_INVALID_CONFIG });
     });
   });
 });

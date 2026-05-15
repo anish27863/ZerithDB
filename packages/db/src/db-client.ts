@@ -3,17 +3,62 @@ import { v7 as uuidv7 } from "uuid";
 import type {
   ZerithDBConfig,
   Document,
+  DocumentId,
   QueryFilter,
   InsertResult,
   UpdateSpec,
 } from "zerithdb-core";
 import { ZerithDBError, ErrorCode } from "zerithdb-core";
 
+export type IndexComparator<T> = (a: T, b: T) => number;
+
+export type IndexDefinition<T extends Record<string, any>> = {
+  name: string;
+  field: keyof T;
+  compare?: IndexComparator<T[keyof T]>;
+};
+
+type IndexEntry = { key: unknown; id: DocumentId };
+
+type IndexState<T extends Record<string, any>> = {
+  name: string;
+  field: keyof T;
+  compare: IndexComparator<unknown>;
+  entries: IndexEntry[];
+};
+
+const defaultIndexCompare: IndexComparator<unknown> = (a, b) => {
+  if (
+    (typeof a !== "string" && typeof a !== "number") ||
+    (typeof b !== "string" && typeof b !== "number")
+  ) {
+    throw new ZerithDBError(
+      ErrorCode.SDK_INVALID_CONFIG,
+      "Index comparator is required for non-string/number field values."
+    );
+  }
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+};
+
+const compareEntries = (
+  compare: IndexComparator<unknown>,
+  a: IndexEntry,
+  b: IndexEntry
+): number => {
+  const result = compare(a.key, b.key);
+  if (result !== 0) return result;
+  return a.id.localeCompare(b.id);
+};
+
 /**
  * A handle to a single named collection within the ZerithDB local database.
  * All operations are async and backed by IndexedDB.
  */
 export class CollectionClient<T extends Record<string, any> = Record<string, any>> {
+  private readonly indexes = new Map<string, IndexState<T>>();
+  private readonly docIndexKeys = new Map<DocumentId, Map<string, unknown>>();
+
   constructor(
     private table: Table<Document<T>>,
     private readonly collectionName: string
@@ -24,6 +69,66 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
    */
   setTable(table: Table<Document<T>>): void {
     this.table = table;
+  }
+
+  async createIndex(def: IndexDefinition<T>): Promise<void> {
+    if (!def.name || typeof def.name !== "string") {
+      throw new ZerithDBError(
+        ErrorCode.SDK_INVALID_CONFIG,
+        "Index name must be a non-empty string."
+      );
+    }
+    if (!def.field || typeof def.field !== "string") {
+      throw new ZerithDBError(
+        ErrorCode.SDK_INVALID_CONFIG,
+        "Index field must be a valid string key."
+      );
+    }
+    if (def.compare !== undefined && typeof def.compare !== "function") {
+      throw new ZerithDBError(
+        ErrorCode.SDK_INVALID_CONFIG,
+        "Index compare must be a function when provided."
+      );
+    }
+
+    const comparator = (def.compare ?? defaultIndexCompare) as IndexComparator<unknown>;
+    const existing = this.indexes.get(def.name);
+    if (existing) {
+      if (existing.field !== def.field || existing.compare !== comparator) {
+        throw new ZerithDBError(
+          ErrorCode.SDK_INVALID_CONFIG,
+          `Index "${def.name}" already exists with different configuration.`
+        );
+      }
+      return;
+    }
+
+    const docs = await this.table.toArray();
+    const entries: IndexEntry[] = docs.map((doc) => ({
+      key: (doc as Record<string, unknown>)[def.field as string],
+      id: doc._id,
+    }));
+
+    if (!def.compare) {
+      for (const entry of entries) {
+        defaultIndexCompare(entry.key, entry.key);
+      }
+    }
+
+    entries.sort((a, b) => compareEntries(comparator, a, b));
+    this.indexes.set(def.name, {
+      name: def.name,
+      field: def.field,
+      compare: comparator,
+      entries,
+    });
+
+    for (const entry of entries) {
+      if (!this.docIndexKeys.has(entry.id)) {
+        this.docIndexKeys.set(entry.id, new Map());
+      }
+      this.docIndexKeys.get(entry.id)?.set(def.name, entry.key);
+    }
   }
 
   /**
