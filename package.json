@@ -27,6 +27,8 @@
   "devDependencies": {
     "@changesets/cli": "^2.27.7",
     "@types/node": "^22.0.0",
+    "fake-indexeddb": "^6.2.5",
+    "happy-dom": "^20.9.0",
     "husky": "^9.1.4",
     "lint-staged": "^15.2.7",
     "prettier": "^3.3.3",

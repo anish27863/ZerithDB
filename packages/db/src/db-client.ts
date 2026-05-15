@@ -15,9 +15,16 @@ import { ZerithDBError, ErrorCode } from "zerithdb-core";
  */
 export class CollectionClient<T extends Record<string, any> = Record<string, any>> {
   constructor(
-    private readonly table: Table<Document<T>>,
+    private table: Table<Document<T>>,
     private readonly collectionName: string
   ) {}
+
+  /**
+   * Internal: refresh the underlying Dexie table reference after a schema change.
+   */
+  setTable(table: Table<Document<T>>): void {
+    this.table = table;
+  }
 
   /**
    * Insert a new document into the collection.
@@ -237,10 +244,18 @@ export class DbClient {
 
   collection<T extends Record<string, any>>(name: string): CollectionClient<T> {
     if (!this.collections.has(name)) {
-      const table = this.dexie.ensureCollection(name);
+      this.dexie.ensureCollection(name);
+      const table = this.dexie.table(name);
       this.collections.set(name, new CollectionClient<T>(table as Table<Document<T>>, name));
+      this.refreshCollectionTables();
     }
     return this.collections.get(name) as CollectionClient<T>;
+  }
+
+  private refreshCollectionTables(): void {
+    for (const [collectionName, collection] of this.collections.entries()) {
+      collection.setTable(this.dexie.table(collectionName));
+    }
   }
 
   async dispose(): Promise<void> {
