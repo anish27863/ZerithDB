@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import "fake-indexeddb/auto";
-import { DbClient } from "../../packages/db/src/db-client.js";
-import { ErrorCode, type ZerithDBConfig } from "../../packages/core/src/index.js";
+import { DbClient } from "../../src/db-client.js";
+import { ErrorCode, type ZerithDBConfig } from "../../src/../../core/src/index.js";
 
 describe("DbClient — CollectionClient", () => {
   let db: DbClient;

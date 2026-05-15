@@ -56,6 +56,47 @@ const compareEntries = (
   return a.id.localeCompare(b.id);
 };
 
+type IndexCondition = {
+  op: "$eq" | "$gt" | "$gte" | "$lt" | "$lte";
+  value: unknown;
+};
+
+const lowerBound = (
+  entries: IndexEntry[],
+  key: unknown,
+  compare: IndexComparator<unknown>
+): number => {
+  let lo = 0;
+  let hi = entries.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (compare(entries[mid]?.key, key) < 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+};
+
+const upperBound = (
+  entries: IndexEntry[],
+  key: unknown,
+  compare: IndexComparator<unknown>
+): number => {
+  let lo = 0;
+  let hi = entries.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (compare(entries[mid]?.key, key) <= 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+};
+
 /**
  * A handle to a single named collection within the ZerithDB local database.
  * All operations are async and backed by IndexedDB.
@@ -147,6 +188,132 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
     }
   }
 
+  private selectIndex(filter: QueryFilter<T>): { index: IndexState<T>; condition: IndexCondition } | undefined {
+    for (const [field, rawCondition] of Object.entries(filter)) {
+      const index = [...this.indexes.values()].find((i) => i.field === field);
+      if (!index) continue;
+
+      if (rawCondition === null || typeof rawCondition !== "object") {
+        return { index, condition: { op: "$eq", value: rawCondition } };
+      }
+
+      const ops = rawCondition as Record<string, unknown>;
+      if ("$eq" in ops) return { index, condition: { op: "$eq", value: ops["$eq"] } };
+      if ("$gt" in ops) return { index, condition: { op: "$gt", value: ops["$gt"] } };
+      if ("$gte" in ops) return { index, condition: { op: "$gte", value: ops["$gte"] } };
+      if ("$lt" in ops) return { index, condition: { op: "$lt", value: ops["$lt"] } };
+      if ("$lte" in ops) return { index, condition: { op: "$lte", value: ops["$lte"] } };
+    }
+    return undefined;
+  }
+
+  private getIndexCandidateIds(index: IndexState<T>, condition: IndexCondition): DocumentId[] {
+    const { entries, compare } = index;
+    let start = 0;
+    let end = entries.length;
+    switch (condition.op) {
+      case "$gt":
+        start = upperBound(entries, condition.value, compare);
+        break;
+      case "$gte":
+        start = lowerBound(entries, condition.value, compare);
+        break;
+      case "$lt":
+        end = lowerBound(entries, condition.value, compare);
+        break;
+      case "$lte":
+        end = upperBound(entries, condition.value, compare);
+        break;
+      case "$eq":
+        start = lowerBound(entries, condition.value, compare);
+        end = upperBound(entries, condition.value, compare);
+        break;
+    }
+    return entries.slice(start, end).map((entry) => entry.id);
+  }
+
+  private insertIndexEntry(index: IndexState<T>, entry: IndexEntry): void {
+    const entries = index.entries;
+    let lo = 0;
+    let hi = entries.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (compareEntries(index.compare, entries[mid]!, entry) <= 0) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    entries.splice(lo, 0, entry);
+  }
+
+  private findEntryIndex(index: IndexState<T>, key: unknown, id: DocumentId): number {
+    const start = lowerBound(index.entries, key, index.compare);
+    const end = upperBound(index.entries, key, index.compare);
+    for (let i = start; i < end; i += 1) {
+      if (index.entries[i]?.id === id) return i;
+    }
+    return -1;
+  }
+
+  private setDocIndexKey(id: DocumentId, indexName: string, key: unknown): void {
+    if (!this.docIndexKeys.has(id)) {
+      this.docIndexKeys.set(id, new Map());
+    }
+    this.docIndexKeys.get(id)?.set(indexName, key);
+  }
+
+  private removeDocIndexKey(id: DocumentId, indexName: string): void {
+    const entry = this.docIndexKeys.get(id);
+    if (!entry) return;
+    entry.delete(indexName);
+    if (entry.size === 0) this.docIndexKeys.delete(id);
+  }
+
+  private applyIndexInsert(doc: Document<T>): void {
+    for (const index of this.indexes.values()) {
+      const key = (doc as Record<string, unknown>)[index.field as string];
+      if (index.compare === defaultIndexCompare) {
+        defaultIndexCompare(key, key);
+      }
+      const entry = { key, id: doc._id };
+      this.insertIndexEntry(index, entry);
+      this.setDocIndexKey(doc._id, index.name, key);
+    }
+  }
+
+  private applyIndexDelete(doc: Document<T>): void {
+    for (const index of this.indexes.values()) {
+      const key = this.docIndexKeys.get(doc._id)?.get(index.name);
+      if (key === undefined) continue;
+      const idx = this.findEntryIndex(index, key, doc._id);
+      if (idx >= 0) index.entries.splice(idx, 1);
+      this.removeDocIndexKey(doc._id, index.name);
+    }
+  }
+
+  private applyIndexUpdate(oldDoc: Document<T>, newDoc: Document<T>): void {
+    this.applyIndexDelete(oldDoc);
+    this.applyIndexInsert(newDoc);
+  }
+
+  private async rebuildIndexes(): Promise<void> {
+    if (this.indexes.size === 0) return;
+    const docs = await this.table.toArray();
+    this.docIndexKeys.clear();
+    for (const index of this.indexes.values()) {
+      const entries: IndexEntry[] = docs.map((doc) => ({
+        key: (doc as Record<string, unknown>)[index.field as string],
+        id: doc._id,
+      }));
+      entries.sort((a, b) => compareEntries(index.compare, a, b));
+      index.entries = entries;
+      for (const entry of entries) {
+        this.setDocIndexKey(entry.id, index.name, entry.key);
+      }
+    }
+  }
+
   /**
    * Insert a new document into the collection.
    * Automatically assigns `_id`, `_createdAt`, and `_updatedAt`.
@@ -162,9 +329,11 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
     };
 
     try {
+      this.applyIndexInsert(doc);
       await this.table.add(doc);
       return { id };
     } catch (err) {
+      await this.rebuildIndexes();
       throw new ZerithDBError(
         ErrorCode.DB_WRITE_FAILED,
         `Failed to insert into collection "${this.collectionName}"`,
@@ -186,9 +355,13 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
     })) as Document<T>[];
 
     try {
+      for (const doc of docs) {
+        this.applyIndexInsert(doc);
+      }
       await this.table.bulkAdd(docs);
       return docs.map((d) => ({ id: d._id }));
     } catch (err) {
+      await this.rebuildIndexes();
       throw new ZerithDBError(
         ErrorCode.DB_WRITE_FAILED,
         `Failed to bulk insert into collection "${this.collectionName}"`,
@@ -209,8 +382,24 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
    */
   async find(filter: QueryFilter<T> = {}): Promise<Document<T>[]> {
     try {
-      const all = await this.table.toArray();
-      return all.filter((doc) => this.matchesFilter(doc, filter));
+      const indexMatch = this.selectIndex(filter);
+      if (!indexMatch) {
+        const all = await this.table.toArray();
+        return all.filter((doc) => this.matchesFilter(doc, filter));
+      }
+
+      const { index, condition } = indexMatch;
+      const candidateIds = this.getIndexCandidateIds(index, condition);
+      if (candidateIds.length === 0) return [];
+
+      const docs = await Promise.all(candidateIds.map((id) => this.table.get(id)));
+      const comparatorOverrides = new Map<string, IndexComparator<unknown>>([
+        [index.field as string, index.compare],
+      ]);
+
+      return (docs as (Document<T> | undefined)[])
+        .filter((doc): doc is Document<T> => Boolean(doc))
+        .filter((doc) => this.matchesFilter(doc, filter, comparatorOverrides));
     } catch (err) {
       throw new ZerithDBError(
         ErrorCode.DB_READ_FAILED,
@@ -244,16 +433,21 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
       const matches = await this.find(filter);
       const now = Date.now();
 
-      await this.table.bulkPut(
-        matches.map((doc) => ({
-          ...doc,
-          ...(spec.$set ?? {}),
-          _updatedAt: now,
-        }))
-      );
+      const updatedDocs = matches.map((doc) => ({
+        ...doc,
+        ...(spec.$set ?? {}),
+        _updatedAt: now,
+      })) as Document<T>[];
+
+      for (let i = 0; i < matches.length; i++) {
+        this.applyIndexUpdate(matches[i]!, updatedDocs[i]!);
+      }
+
+      await this.table.bulkPut(updatedDocs);
 
       return matches.length;
     } catch (err) {
+      await this.rebuildIndexes();
       throw new ZerithDBError(
         ErrorCode.DB_WRITE_FAILED,
         `Failed to update documents in "${this.collectionName}"`,
@@ -269,9 +463,13 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
   async delete(filter: QueryFilter<T>): Promise<number> {
     try {
       const matches = await this.find(filter);
+      for (const doc of matches) {
+        this.applyIndexDelete(doc);
+      }
       await this.table.bulkDelete(matches.map((d) => d._id));
       return matches.length;
     } catch (err) {
+      await this.rebuildIndexes();
       throw new ZerithDBError(
         ErrorCode.DB_DELETE_FAILED,
         `Failed to delete documents from "${this.collectionName}"`,
@@ -285,8 +483,13 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
    */
   async clearAll(): Promise<void> {
     try {
+      this.docIndexKeys.clear();
+      for (const index of this.indexes.values()) {
+        index.entries = [];
+      }
       await this.table.clear();
     } catch (err) {
+      await this.rebuildIndexes();
       throw new ZerithDBError(
         ErrorCode.DB_DELETE_FAILED,
         `Failed to clear collection "${this.collectionName}"`,
@@ -303,9 +506,14 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
     return docs.length;
   }
 
-  private matchesFilter(doc: Document<T>, filter: QueryFilter<T>): boolean {
+  private matchesFilter(
+    doc: Document<T>,
+    filter: QueryFilter<T>,
+    comparators?: Map<string, IndexComparator<unknown>>
+  ): boolean {
     for (const [key, condition] of Object.entries(filter)) {
       const fieldValue = (doc as Record<string, any>)[key];
+      const comparator = comparators?.get(key);
 
       if (condition === null || typeof condition !== "object") {
         if (fieldValue !== condition) return false;
@@ -315,10 +523,14 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
       const ops = condition as Record<string, any>;
       if ("$eq" in ops && fieldValue !== ops["$eq"]) return false;
       if ("$ne" in ops && fieldValue === ops["$ne"]) return false;
-      if ("$gt" in ops && !((fieldValue as any) > (ops["$gt"] as never))) return false;
-      if ("$gte" in ops && !((fieldValue as any) >= (ops["$gte"] as never))) return false;
-      if ("$lt" in ops && !((fieldValue as any) < (ops["$lt"] as never))) return false;
-      if ("$lte" in ops && !((fieldValue as any) <= (ops["$lte"] as never))) return false;
+      if ("$gt" in ops && !(comparator ? comparator(fieldValue, ops["$gt"]) > 0 : (fieldValue as any) > (ops["$gt"] as never)))
+        return false;
+      if ("$gte" in ops && !(comparator ? comparator(fieldValue, ops["$gte"]) >= 0 : (fieldValue as any) >= (ops["$gte"] as never)))
+        return false;
+      if ("$lt" in ops && !(comparator ? comparator(fieldValue, ops["$lt"]) < 0 : (fieldValue as any) < (ops["$lt"] as never)))
+        return false;
+      if ("$lte" in ops && !(comparator ? comparator(fieldValue, ops["$lte"]) <= 0 : (fieldValue as any) <= (ops["$lte"] as never)))
+        return false;
       if ("$in" in ops && !(ops["$in"] as unknown[]).includes(fieldValue)) return false;
       if ("$nin" in ops && (ops["$nin"] as unknown[]).includes(fieldValue)) return false;
     }
