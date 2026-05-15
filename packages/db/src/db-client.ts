@@ -28,6 +28,11 @@ type IndexState<T extends Record<string, any>> = {
 };
 
 const defaultIndexCompare: IndexComparator<unknown> = (a, b) => {
+  if (a === null || a === undefined) {
+    if (b === null || b === undefined) return 0;
+    return -1;
+  }
+  if (b === null || b === undefined) return 1;
   if (
     (typeof a !== "string" && typeof a !== "number") ||
     (typeof b !== "string" && typeof b !== "number")
@@ -103,31 +108,42 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
       return;
     }
 
-    const docs = await this.table.toArray();
-    const entries: IndexEntry[] = docs.map((doc) => ({
-      key: (doc as Record<string, unknown>)[def.field as string],
-      id: doc._id,
-    }));
+    try {
+      const docs = await this.table.toArray();
+      const entries: IndexEntry[] = docs.map((doc) => ({
+        key: (doc as Record<string, unknown>)[def.field as string],
+        id: doc._id,
+      }));
 
-    if (!def.compare) {
+      if (!def.compare) {
+        for (const entry of entries) {
+          defaultIndexCompare(entry.key, entry.key);
+        }
+      }
+
+      entries.sort((a, b) => compareEntries(comparator, a, b));
+      this.indexes.set(def.name, {
+        name: def.name,
+        field: def.field,
+        compare: comparator,
+        entries,
+      });
+
       for (const entry of entries) {
-        defaultIndexCompare(entry.key, entry.key);
+        if (!this.docIndexKeys.has(entry.id)) {
+          this.docIndexKeys.set(entry.id, new Map());
+        }
+        this.docIndexKeys.get(entry.id)?.set(def.name, entry.key);
       }
-    }
-
-    entries.sort((a, b) => compareEntries(comparator, a, b));
-    this.indexes.set(def.name, {
-      name: def.name,
-      field: def.field,
-      compare: comparator,
-      entries,
-    });
-
-    for (const entry of entries) {
-      if (!this.docIndexKeys.has(entry.id)) {
-        this.docIndexKeys.set(entry.id, new Map());
+    } catch (err) {
+      if (err instanceof ZerithDBError && err.code === ErrorCode.SDK_INVALID_CONFIG) {
+        throw err;
       }
-      this.docIndexKeys.get(entry.id)?.set(def.name, entry.key);
+      throw new ZerithDBError(
+        ErrorCode.DB_READ_FAILED,
+        `Failed to create index "${def.name}" on "${this.collectionName}"`,
+        { cause: err }
+      );
     }
   }
 

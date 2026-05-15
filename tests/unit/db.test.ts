@@ -183,5 +183,29 @@ describe("DbClient — CollectionClient", () => {
         col.createIndex({ name: "meta_idx", field: "meta" })
       ).rejects.toMatchObject({ code: ErrorCode.SDK_INVALID_CONFIG });
     });
+
+    it("should allow missing optional field values", async () => {
+      const col = db.collection<{ rank?: number | null }>("optional-rank");
+      await col.insertMany([{ rank: 2 }, {}, { rank: null }]);
+
+      await expect(
+        col.createIndex({ name: "rank_idx", field: "rank" })
+      ).resolves.toBeUndefined();
+    });
+
+    it("should wrap comparator errors as DB_READ_FAILED", async () => {
+      const col = db.collection<{ score: number }>("score");
+      await col.insertMany([{ score: 1 }, { score: 2 }]);
+
+      await expect(
+        col.createIndex({
+          name: "score_idx",
+          field: "score",
+          compare: () => {
+            throw new Error("boom");
+          },
+        })
+      ).rejects.toMatchObject({ code: ErrorCode.DB_READ_FAILED });
+    });
   });
 });
