@@ -1,0 +1,51 @@
+name: Auto Label Approved PR
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  manage-label:
+    # Only run for trusted reviewers (Maintainers)
+    if: |
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Approved Label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const state = context.payload.review.state;
+            const issue_number = context.issue.number;
+            const { owner, repo } = context.repo;
+            const labelName = 'gssoc:approved';
+
+            if (state === 'approved') {
+              await github.rest.issues.addLabels({
+                issue_number,
+                owner,
+                repo,
+                labels: [labelName]
+              });
+              console.log(`Added label "${labelName}" to PR #${issue_number}`);
+            } else if (state === 'changes_requested') {
+              try {
+                await github.rest.issues.removeLabel({
+                  issue_number,
+                  owner,
+                  repo,
+                  name: labelName
+                });
+                console.log(`Removed label "${labelName}" from PR #${issue_number} due to changes requested`);
+              } catch (error) {
+                if (error.status === 404) {
+                  console.log(`Label "${labelName}" not found or already removed from PR #${issue_number}`);
+                } else {
+                  throw error;
+                }
+              }
+            }
