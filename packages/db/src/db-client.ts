@@ -9,6 +9,8 @@ import type {
   UpdateSpec,
 } from "zerithdb-core";
 import { ZerithDBError, ErrorCode } from "zerithdb-core";
+import { wrapIDBOperation } from "./internal/wrap-idb-operation.js";
+import type { BackupExportOptions, BackupSnapshot } from "./backup.js";
 
 export type IndexComparator<T> = (a: T, b: T) => number;
 
@@ -413,15 +415,11 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
    * Find a single document by its `_id`.
    */
   async findById(id: string): Promise<Document<T> | undefined> {
-    try {
-      return await this.table.get(id);
-    } catch (err) {
-      throw new ZerithDBError(
-        ErrorCode.DB_READ_FAILED,
-        `Failed to get document "${id}" from "${this.collectionName}"`,
-        { cause: err }
-      );
-    }
+    return wrapIDBOperation(
+      ErrorCode.DB_READ_FAILED,
+      `Failed to get document "${id}" from "${this.collectionName}"`,
+      () => this.table.get(id)
+    );
   }
 
   /**
@@ -538,23 +536,39 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
   }
 }
 
+/**
+ * Internal Dexie subclass that manages dynamic collection creation.
+ * Collections are added lazily via schema version upgrades.
+ */
 class ZerithDBDexie extends Dexie {
   private readonly tableMap = new Map<string, Table>();
+  private _currentSchema: Record<string, string> = {};
+  private _pendingVersion = 0;
 
   constructor(appId: string) {
     super(`zerithdb_${appId}`);
   }
 
+  /**
+   * Ensure a named collection exists, creating it via a Dexie version
+   * upgrade if it has not been registered yet.
+   *
+   * @param name - The collection name to create or retrieve
+   * @returns The Dexie {@link Table} handle for the collection
+   */
   ensureCollection(name: string): Table {
     if (!this.tableMap.has(name)) {
-      // Dexie requires version upgrade to add tables — we use a dynamic schema pattern
-      const version = (this.verno ?? 0) + 1;
-      const existingTableNames = this.tableMap.keys();
-      const schema: Record<string, string> = { [name]: "_id, _createdAt, _updatedAt" };
-      for (const existingName of existingTableNames) {
-        schema[existingName] = "_id, _createdAt, _updatedAt";
+      this._currentSchema[name] = "_id, _createdAt, _updatedAt";
+      
+      // We must increment the version for every new collection added dynamically
+      const nextVersion = Math.max(this.verno, this._pendingVersion) + 1;
+      this._pendingVersion = nextVersion;
+
+      if (this.isOpen()) {
+        this.close();
       }
-      this.version(version).stores(schema);
+
+      this.version(nextVersion).stores(this._currentSchema);
       this.tableMap.set(name, this.table(name));
     }
     // biome-ignore lint: map guarantees this is defined
@@ -568,10 +582,12 @@ class ZerithDBDexie extends Dexie {
  */
 export class DbClient {
   private readonly dexie: ZerithDBDexie;
+  private readonly appId: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly collections = new Map<string, CollectionClient<any>>();
 
   constructor(config: ZerithDBConfig) {
+    this.appId = config.appId;
     this.dexie = new ZerithDBDexie(config.appId);
   }
 
