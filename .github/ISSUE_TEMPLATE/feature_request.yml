@@ -1,4 +1,4 @@
-name: 🚀 Feature Request
+name: "🚀 Feature Request"
 description: Suggest a new feature or enhancement for ZerithDB
 title: "[Feature]: "
 labels: ["enhancement", "needs-discussion"]
@@ -32,6 +32,19 @@ body:
       placeholder: |
         I'd like a new API method / config option / CLI command that...
         It should behave like... and accept the following parameters...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: 🎯 Use Case
+      description: |
+        Describe a real-world scenario where this feature would be useful.
+        Explain who benefits from it and how it improves their workflow.
+      placeholder: |
+        As a developer, I want to...
+        This would help because...
     validations:
       required: true
  
