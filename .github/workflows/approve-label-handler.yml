@@ -27,13 +27,30 @@ jobs:
           script: |
             const fs = require('fs');
             const prNumber = parseInt(fs.readFileSync('pr_number.txt', 'utf8').trim());
-            const state = fs.readFileSync('review_state.txt', 'utf8').trim();
+            const state = fs.readFileSync('state.txt', 'utf8').trim();
             const labelName = 'gssoc:approved';
             const { owner, repo } = context.repo;
 
-            console.log(`Processing PR #${prNumber} with review state: ${state}`);
+            console.log(`Processing PR #${prNumber} with action/state: ${state}`);
 
-            if (state === 'approved') {
+            // Handle the /approve command
+            if (state === 'command_approve') {
+              try {
+                await github.rest.pulls.createReview({
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  event: 'APPROVE',
+                  body: 'Approved via `/approve` command.'
+                });
+                console.log(`Successfully submitted approval review for PR #${prNumber}`);
+              } catch (error) {
+                console.log(`Failed to submit approval review (might already be approved): ${error.message}`);
+              }
+            }
+
+            // Add or remove labels
+            if (state === 'approved' || state === 'command_approve') {
               await github.rest.issues.addLabels({
                 issue_number: prNumber,
                 owner,

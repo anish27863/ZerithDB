@@ -1,51 +1,38 @@
-name: Auto Label Approved PR
+name: Approve Label Trigger
 
 on:
   pull_request_review:
     types: [submitted]
-
-permissions:
-  issues: write
-  pull-requests: write
+  issue_comment:
+    types: [created]
 
 jobs:
-  manage-label:
+  check-trigger:
     # Only run for trusted reviewers (Maintainers)
     if: |
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
+      (github.event_name == 'pull_request_review' && 
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)) ||
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request && 
+       startsWith(github.event.comment.body, '/approve') && 
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     steps:
-      - name: Update Approved Label
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const state = context.payload.review.state;
-            const issue_number = context.issue.number;
-            const { owner, repo } = context.repo;
-            const labelName = 'gssoc:approved';
+      - name: Save review info
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+            echo "${{ github.event.pull_request.number }}" > pr_number.txt
+            echo "${{ github.event.review.state }}" > state.txt
+          else
+            echo "${{ github.event.issue.number }}" > pr_number.txt
+            echo "command_approve" > state.txt
+          fi
 
-            if (state === 'approved') {
-              await github.rest.issues.addLabels({
-                issue_number,
-                owner,
-                repo,
-                labels: [labelName]
-              });
-              console.log(`Added label "${labelName}" to PR #${issue_number}`);
-            } else if (state === 'changes_requested') {
-              try {
-                await github.rest.issues.removeLabel({
-                  issue_number,
-                  owner,
-                  repo,
-                  name: labelName
-                });
-                console.log(`Removed label "${labelName}" from PR #${issue_number} due to changes requested`);
-              } catch (error) {
-                if (error.status === 404) {
-                  console.log(`Label "${labelName}" not found or already removed from PR #${issue_number}`);
-                } else {
-                  throw error;
-                }
-              }
-            }
+      - name: Upload review info
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-info
+          path: |
+            pr_number.txt
+            state.txt
+          retention-days: 1
