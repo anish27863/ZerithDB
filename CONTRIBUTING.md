@@ -139,6 +139,118 @@ pnpm --filter zerithdb-db test --watch
 
 ---
 
+## Running Tests Locally
+
+ZerithDB uses different layers of testing to ensure reliability across packages.
+
+| Test Type | Tool | Location |
+|------------|------|-----------|
+| Unit Tests | Vitest | `packages/*/src/__tests__/` |
+| Integration Tests | Vitest | `tests/integration/` |
+| End-to-End (E2E) | Playwright | `tests/e2e/` |
+
+---
+
+### Run All Tests
+
+```bash
+pnpm test
+```
+
+Runs the complete test suite across all packages.
+
+---
+
+### Run Tests with Coverage
+
+```bash
+pnpm test --coverage
+```
+
+Generates a code coverage report for the repository.
+
+---
+
+### Run E2E Tests
+
+```bash
+pnpm test:e2e
+```
+
+Runs Playwright-powered browser tests.
+
+Before running E2E tests for the first time, install Playwright browsers:
+
+```bash
+pnpm exec playwright install
+```
+
+---
+
+### Run Tests in Watch Mode
+
+```bash
+pnpm --filter zerithdb-db test --watch
+```
+
+Useful during development for continuous feedback while editing code.
+
+You can replace `zerithdb-db` with any workspace package.
+
+---
+
+### Run Tests for a Single Package
+
+```bash
+pnpm --filter zerithdb-db test
+```
+
+Examples:
+
+```bash
+pnpm --filter zerithdb-auth test
+pnpm --filter zerithdb-network test
+```
+
+---
+
+### Recommended Workflow
+
+After making changes:
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+```
+
+Ensure all checks pass before opening a pull request.
+
+---
+
+### Troubleshooting
+
+#### Playwright browsers missing
+
+```bash
+pnpm exec playwright install
+```
+
+#### Dependency issues
+
+```bash
+rm -rf node_modules
+pnpm install
+```
+
+#### Build errors
+
+```bash
+pnpm build
+```
+
+---
+
 ## Issue Labels
 
 | Label              | Meaning                                          |
