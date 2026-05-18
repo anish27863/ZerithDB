@@ -2,12 +2,12 @@
 // zerithdb-core — Public API
 // ─────────────────────────────────────────────────────────────────────────────
 export { EventEmitter } from "./internal/event-emitter.js";
-export {
-  ZerithDBError,
-  ZerithValidationError,
-  ErrorCode,
-} from "./errors.js";
+export { ZerithDBError, ErrorCode, SchemaValidationError } from "zerithdb-errors";
 export { Logger } from "./internal/logger.js";
+
+export { ValidatorRegistry } from "./internal/validator-registry.js";
+export type { RegisteredValidator, ValidationResult } from "./internal/validator-registry.js";
+
 export type {
   ZerithDBConfig,
   SyncConfig,
@@ -16,6 +16,7 @@ export type {
   DebugConfig,
   ConflictResolverConfig,
 } from "./types/config.js";
+
 export type {
   Document,
   DocumentId,
@@ -26,10 +27,25 @@ export type {
   UpdateSpec,
   InsertResult,
   FindResult,
-  SchemaValidator,
   CollectionOptions,
 } from "./types/db.js";
-export type { PeerId, PeerInfo, RoomId, NetworkMessage } from "./types/network.js";
+export type {
+  SchemaLike,
+  SafeParseResult,
+  ValidationMode,
+  CollectionSchemaOptions,
+} from "./types/validation.js";
+
+export type {
+  PeerId,
+  PeerInfo,
+  RoomId,
+  NetworkMessage,
+  MediaStreamKind,
+  MediaTrackMetadata,
+  MediaStreamMetadata,
+} from "./types/network.js";
+
 export type { Identity, PublicKey, Signature } from "./types/auth.js";
 export type {
   SyncUpdate,

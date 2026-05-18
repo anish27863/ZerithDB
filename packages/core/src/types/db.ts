@@ -53,6 +53,14 @@ export type QueryFilter<T extends Record<string, any>> = {
     | { $regex: RegExp | string };
 };
 
+import type { CollectionSchemaOptions } from "./validation.js";
+
+/** Options when creating a collection handle */
+export interface CollectionOptions<T extends Record<string, any> = Record<string, any>> {
+  /** Optional schema validation */
+  validation?: CollectionSchemaOptions<T>;
+}
+
 /** Partial update spec — only user-defined fields are modified */
 export type UpdateSpec<T extends Record<string, any>> = {
   $set?: Partial<T>;

@@ -11,6 +11,8 @@ export interface MediaStreamMetadataInput {
   [key: string]: unknown;
 }
 
+
+
 export interface WebRtcBufferStats {
   peerCount: number;
   bufferedBytes: number;
@@ -29,8 +31,7 @@ type NetworkEvents = {
   message: { type: string; payload: Uint8Array | string; from: PeerId };
   error: { peerId: PeerId; error: Error };
   "transport:downgrade": { from: "websocket"; to: "polling"; reason: string };
-  "media:stream": { peerId: PeerId; stream: MediaStream; metadata?: MediaStreamMetadata };
-  "media:stream:removed": { peerId: PeerId; streamId: string };
+
 };
 
 export type MediaStreamMetadataInput = Partial<
@@ -74,14 +75,9 @@ export class NetworkManager extends EventEmitter<NetworkEvents> {
   private reconnectAttempts = 0;
   private disposed = false;
   private currentUrlIndex = 0;
-  private readonly localMetadata = new Map<string, MediaStreamMetadata>();
-
-  // ─── Self-healing peer mesh ───────────────────────────────────────────────
-  // Tracks every peer ID we've ever seen in the room so we can detect
-  // missing connections and re-initiate them automatically.
-  private readonly knownPeerIds = new Set<PeerId>();
-  private readonly peerCreationTimes = new Map<PeerId, number>();
-  private peerCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly localStreamsMetadata = new Map<string, MediaStreamMetadata>();
+  private readonly nameRegistry = new NameRegistry();
+  private ensResolver: MockENSResolver;
 
   constructor(
     private readonly config: ZerithDBConfig,
@@ -90,7 +86,8 @@ export class NetworkManager extends EventEmitter<NetworkEvents> {
     super();
   }
 
-  /** The local peer ID assigned to this instance */
+
+
   get peerId(): PeerId {
     return this.localPeerId;
   }
@@ -251,6 +248,8 @@ export class NetworkManager extends EventEmitter<NetworkEvents> {
       }
     }
   }
+
+
 
   /**
    * Broadcast a message to all connected peers.
@@ -704,6 +703,13 @@ export class NetworkManager extends EventEmitter<NetworkEvents> {
       };
       this.peerInfo.set(remotePeerId, info);
       this.emit("peer:connected", info);
+    });
+
+    peer.on("stream", (stream) => {
+      this.emit("media:stream", {
+        peerId: remotePeerId,
+        stream,
+      });
     });
 
     peer.on("data", (data: Uint8Array | string) => {

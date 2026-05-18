@@ -1,5 +1,8 @@
-import { Logger } from "zerithdb-core";
 import type { ZerithDBConfig, CollectionOptions } from "zerithdb-core";
+import { ValidatorRegistry } from "zerithdb-core";
+import { Logger } from "zerithdb-core";
+import type { Document, Identity, QueryFilter, SyncState } from "zerithdb-core";
+export type { Document, Identity, QueryFilter, SyncState, ZerithDBConfig, CollectionOptions };
 import { MemoryCollector, estimateStorageBytes } from "zerithdb-devtools";
 import { ZerithDBError, ErrorCode } from "zerithdb-core";
 import { DbClient, CollectionClient } from "./db-client.js";
@@ -36,7 +39,10 @@ export interface ZerithDBApp {
    * await todos.insert({ text: "", done: false });       // ❌ throws DB_VALIDATION_FAILED
    * ```
    */
-  db<T extends Record<string, any> = Record<string, any>>(name: string, options?: CollectionOptions<T>): CollectionClient<T>;
+  db<T extends Record<string, any> = Record<string, any>>(
+    name: string,
+    options?: CollectionOptions<T>
+  ): CollectionClient<T>;
 
   /** CRDT sync engine — manages Yjs documents and P2P update propagation */
   sync: SyncEngine;
@@ -131,47 +137,21 @@ export function createApp(config: ZerithDBConfig): ZerithDBApp {
   };
 
   const logger = new Logger(resolvedConfig, "SDK");
-  logger.info("Initializing ZerithDB app", { appId: resolvedConfig.appId });
+  logger.info("Initializing ZerithDB app", {
+    appId: resolvedConfig.appId,
+  });
 
   const auth = new AuthManager(resolvedConfig);
-  const db = new DbClient(resolvedConfig);
+  const validatorRegistry = new ValidatorRegistry();
+
+  const db = new DbClient(resolvedConfig,auth);
+  db.setValidatorRegistry(validatorRegistry);
+
   const network = new NetworkManager(resolvedConfig, auth);
-  let syncInstance: SyncEngine | null = null;
-
-  const getSync = () => {
-    if (!syncInstance) {
-      syncInstance = new SyncEngine(resolvedConfig, db, network, auth);
-    }
-
-    return syncInstance;
-  };
-
-  if (resolvedConfig.conflictResolver?.enabled === true) {
-    const resolver = new LLMConflictResolver({
-      modelName: resolvedConfig.conflictResolver.modelName,
-      autoApplyThreshold: resolvedConfig.conflictResolver.autoApplyThreshold,
-    });
-
-    sync.registerPlugin({
-      id: resolver.id,
-      version: resolver.version,
-      conflictResolver: resolver,
-    });
-
-    if (resolvedConfig.conflictResolver.onConflict) {
-      const onConflict = resolvedConfig.conflictResolver.onConflict;
-      sync.on("conflict:flagged", (event) => {
-        const suggestion =
-          typeof event === "object" && event !== null && "suggestion" in event &&
-          typeof event.suggestion === "string"
-            ? event.suggestion
-            : "Conflict flagged for review";
-        onConflict(event.collectionName, suggestion);
-      });
-    }
-  }
+  const sync = new SyncEngine(resolvedConfig, db, network, validatorRegistry);
 
   let memoryCollector: MemoryCollector | null = null;
+
   if (resolvedConfig.debug?.devtools === true) {
     memoryCollector = new MemoryCollector({
       measureIndexedDB: async () => {
@@ -179,26 +159,46 @@ export function createApp(config: ZerithDBConfig): ZerithDBApp {
           estimateStorageBytes(),
           db.getMemoryStats(),
         ]);
+
         return {
           totalBytes,
           recordCount: dbStats.recordCount,
           collections: dbStats.collections,
         };
       },
+
       measureWebRTC: () => network.getBufferStats(),
     });
+
     memoryCollector.start();
   }
 
   const backupAdapters = new Set<LocalCloudBackupAdapter>();
 
+  // Cache collections so validation schema registration happens only once
+  const collectionCache = new Map<string, CollectionClient<any>>();
+
   return {
     config: Object.freeze(resolvedConfig),
 
-    db<T extends Record<string, any>>(name: string, options?: CollectionOptions<T>): CollectionClient<T> {
-      // DbClient already caches collection instances internally —
-      // no need for a second cache layer here.
-      return db.collection<T>(name, options);
+    db<T extends Record<string, any>>(
+      name: string,
+      options?: CollectionOptions<T>
+    ): CollectionClient<T> {
+      if (!collectionCache.has(name)) {
+        // Register schema BEFORE creating/retrieving collection
+        if (options?.validation) {
+          validatorRegistry.register(
+            name,
+            options.validation.schema,
+            options.validation.mode ?? "strict"
+          );
+        }
+
+        collectionCache.set(name, db.collection<T>(name));
+      }
+
+      return collectionCache.get(name) as CollectionClient<T>;
     },
 
     dbClient: db,
@@ -209,19 +209,20 @@ export function createApp(config: ZerithDBConfig): ZerithDBApp {
 
     backup(target: CloudBackupTarget, options?: LocalCloudBackupOptions): LocalCloudBackupAdapter {
       const adapter = new LocalCloudBackupAdapter(db, target, options);
+
       backupAdapters.add(adapter);
+
       return adapter;
     },
 
     async dispose(): Promise<void> {
       memoryCollector?.stop();
-      await Promise.all(Array.from(backupAdapters).map((a) => a.stop()));
-      backupAdapters.clear();
-      if (syncInstance) {
-        await syncInstance.dispose();
-      }
 
-      await Promise.all([network.dispose(), db.dispose()]);
+      await Promise.all(Array.from(backupAdapters).map((a) => a.stop()));
+
+      backupAdapters.clear();
+
+      await Promise.all([sync.dispose(), network.dispose(), db.dispose()]);
     },
   };
 }

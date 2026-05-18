@@ -171,37 +171,42 @@ export class AuthManager extends EventEmitter<AuthEvents> {
   }
 
   /**
-   * Generate recovery shards for the current master identity private key using Shamir's Secret Sharing.
+   * Generate Shamir's Secret Sharing shards from the current identity's private key.
+   * Generate recovery shards for the current master identity private key using Shamir's Secret Sharing.  [KEPT BOTH COMMENTS]
    */
   async generateRecoveryShards(threshold: number, total: number): Promise<string[]> {
     if (this.privateKeyBytes === null) {
       throw new ZerithDBError(
         ErrorCode.AUTH_KEY_NOT_FOUND,
-        "No identity loaded. Call auth.signIn() first before generating shards."
+        "No identity loaded. Call auth.signIn() before generating shards."
       );
     }
+
+    const { splitSecret } = await import("zerithdb-wasm-crypto");
     return splitSecret(this.privateKeyBytes, threshold, total);
   }
 
   /**
-   * Recover and restore the master identity private key using a threshold of base64-encoded shards.
+   * Recover and load an identity using Shamir's Secret Sharing shards.
    */
   async recoverIdentity(shards: string[]): Promise<Identity> {
     try {
-      const privateKey = await recoverSecret(shards);
-      const publicKeyBytes = await ed.getPublicKeyAsync(privateKey);
+      const { recoverSecret } = await import("zerithdb-wasm-crypto");
+      const privateKeyBytes = await recoverSecret(shards);
 
+      const publicKeyBytes = await ed.getPublicKeyAsync(privateKeyBytes);
       const identity = this.buildIdentity(publicKeyBytes);
-      this._identity = identity;
-      this.privateKeyBytes = privateKey;
 
-      this.saveToStorage(privateKey, publicKeyBytes);
+      this._identity = identity;
+      this.privateKeyBytes = privateKeyBytes;
+
+      this.saveToStorage(privateKeyBytes, publicKeyBytes);
       this.emit("identity:change", identity);
       return identity;
     } catch (err) {
       throw new ZerithDBError(
         ErrorCode.AUTH_VERIFY_FAILED,
-        "Failed to reconstruct master key from the provided shards. Ensure the shards are correct and meet the required threshold.",
+        "Failed to recover identity. Invalid shards or insufficient threshold.",
         { cause: err }
       );
     }

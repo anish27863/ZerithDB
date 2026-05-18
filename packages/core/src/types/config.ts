@@ -61,11 +61,11 @@ transport?: "auto" | "websocket" | "polling";
 }
 
 export interface EphemeralConfig {
-  /** How often (in ms) to check for and prune stale remote peers @default 5000 */
-  cleanupIntervalMs?: number;
-  /** Delay (in ms) to throttle outgoing presence broadcasts @default 0 */
+  /** Delay in ms to throttle ephemeral broadcasts. @default 0 */
   throttleMs?: number;
-  /** Inactive duration (in ms) after which a peer is treated as stale and pruned @default 30000 */
+  /** Interval in ms to prune stale peer states. @default 5000 */
+  cleanupIntervalMs?: number;
+  /** Delay in ms after which a peer is considered stale. @default 30000 */
   staleAfterMs?: number;
 }
 

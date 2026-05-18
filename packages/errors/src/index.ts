@@ -16,6 +16,7 @@ export enum ErrorCode {
   SYNC_INIT_FAILED = "SYNC_INIT_FAILED",
   SYNC_APPLY_FAILED = "SYNC_APPLY_FAILED",
   SYNC_ENCODE_FAILED = "SYNC_ENCODE_FAILED",
+  SYNC_VALIDATION_FAILED = "SYNC_VALIDATION_FAILED",
 
   // Network errors
   NETWORK_SIGNALING_FAILED = "NETWORK_SIGNALING_FAILED",
@@ -35,6 +36,7 @@ export enum ErrorCode {
   SDK_INVALID_CONFIG = "SDK_INVALID_CONFIG",
   SDK_NOT_INITIALIZED = "SDK_NOT_INITIALIZED",
   SDK_UNSUPPORTED_ENVIRONMENT = "SDK_UNSUPPORTED_ENVIRONMENT",
+
   // Utility and core errors
   ASSERTION_FAILED = "ASSERTION_FAILED",
   INVALID_HEX_STRING = "INVALID_HEX_STRING",
@@ -74,5 +76,21 @@ export class ZerithDBError extends Error {
 
   override toString(): string {
     return `${this.name} [${this.code}]: ${this.message}`;
+  }
+}
+
+export class SchemaValidationError extends ZerithDBError {
+  public readonly issues: ReadonlyArray<{ path: Array<string | number | symbol>; message: string }>;
+
+  constructor(
+    code: ErrorCode,
+    message: string,
+    issues: Array<{ path: Array<string | number | symbol>; message: string }>,
+    options?: ErrorOptions
+  ) {
+    super(code, message, options);
+    this.name = "SchemaValidationError";
+    this.issues = issues;
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }

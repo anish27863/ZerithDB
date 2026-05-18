@@ -1,5 +1,6 @@
 import { Dexie, type Table, liveQuery } from "dexie";
 import { v7 as uuidv7 } from "uuid";
+
 import type {
   ZerithDBConfig,
   Document,
@@ -7,9 +8,15 @@ import type {
   QueryOptions,
   InsertResult,
   UpdateSpec,
-  CollectionOptions,
+  ValidatorRegistry,
 } from "zerithdb-core";
-import { ZerithDBError, ErrorCode, EventEmitter } from "zerithdb-core";
+
+import {
+  ZerithDBError,
+  ErrorCode,
+  SchemaValidationError,
+} from "zerithdb-errors";
+
 import { wrapIDBOperation } from "./internal/wrap-idb-operation.js";
 import { EventEmitter } from "zerithdb-core";
 import type { BackupExportOptions, BackupSnapshot } from "./backup.js";
@@ -17,52 +24,178 @@ import { GraphClient } from "./graph-client.js";
 import type { GraphNode, GraphEdge } from "zerithdb-core";
 
 /**
- * A handle to a single named collection within the ZerithDB local database.
- * All operations are async and backed by IndexedDB.
+ * Internal Dexie subclass that manages dynamic collection creation.
+ * Collections are added lazily via schema version upgrades.
  */
-export class CollectionClient<
-  T extends Record<string, any> = Record<string, any>
-> extends EventEmitter<CollectionEvents<T>> {
-  constructor(
-    private readonly table: Table<Document<T>>,
-    private readonly collectionName: string,
-    private readonly peerId: string
-  ) {
-    super();
+class ZerithDBDexie extends Dexie {
+  private readonly tableMap = new Map<string, Table>();
+  private _currentSchema: Record<string, string> = {};
+  private _pendingVersion = 0;
+
+  constructor(appId: string) {
+    super(`zerithdb_${appId}`);
   }
 
   /**
-   * Validates a raw document against the collection schema (if configured).
-   * Throws a `ZerithDBError` with code `DB_VALIDATION_FAILED` on failure.
+   * Ensure a named collection exists, creating it via a Dexie version
+   * upgrade if it has not been registered yet.
+   *
+   * @param name - The collection name to create or retrieve
+   * @returns The Dexie Table handle for the collection
    */
-  private validateDoc(doc: T): void {
-    if (!this.options?.schema) return;
-    try {
-      this.options.schema.parse(doc);
-    } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : `Document failed schema validation in collection "${this.collectionName}"`;
-      throw new ZerithDBError(
-        ErrorCode.DB_VALIDATION_FAILED,
-        `Schema validation failed in "${this.collectionName}": ${message}`,
-        { cause: err }
+  ensureCollection(name: string): Table {
+    if (!this.tableMap.has(name)) {
+      this._currentSchema[name] = "_id, _createdAt, _updatedAt";
+
+      const nextVersion = Math.max(this.verno, this._pendingVersion) + 1;
+      this._pendingVersion = nextVersion;
+
+      if (this.isOpen()) {
+        this.close();
+      }
+
+      this.version(nextVersion).stores(this._currentSchema);
+      this.tableMap.set(name, this.table(name));
+    }
+
+    return this.tableMap.get(name)!;
+  }
+
+  ensureGraphTables(
+    graphName: string
+  ): { nodesTable: Table; edgesTable: Table } {
+    const nodesKey = `__graph_nodes_${graphName}`;
+    const edgesKey = `__graph_edges_${graphName}`;
+
+    if (!this.tableMap.has(nodesKey) || !this.tableMap.has(edgesKey)) {
+      this._currentSchema[nodesKey] = "_id, _createdAt, _updatedAt";
+      this._currentSchema[edgesKey] =
+        "_id, from, to, label, _createdAt";
+
+      const nextVersion = Math.max(this.verno, this._pendingVersion) + 1;
+      this._pendingVersion = nextVersion;
+
+      if (this.isOpen()) {
+        this.close();
+      }
+
+      this.version(nextVersion).stores(this._currentSchema);
+
+      this.tableMap.set(nodesKey, this.table(nodesKey));
+      this.tableMap.set(edgesKey, this.table(edgesKey));
+    }
+
+    return {
+      nodesTable: this.tableMap.get(nodesKey)!,
+      edgesTable: this.tableMap.get(edgesKey)!,
+    };
+  }
+}
+
+/**
+ * Client for a specific collection.
+ * Provides CRUD operations with optional schema validation.
+ */
+export class CollectionClient<
+  T extends Record<string, any> = Record<string, any>
+> {
+  constructor(
+    private readonly dexie: ZerithDBDexie,
+    private readonly collectionName: string,
+    private readonly validatorRegistry?: ValidatorRegistry,
+    private readonly onValidationError?: (
+      error: SchemaValidationError
+    ) => void,
+    private readonly auth?: any
+  ) {}
+
+  /**
+   * Internal Dexie table accessor
+   */
+  private get table(): Table<Document<T>> {
+    return this.dexie.table(this.collectionName);
+  }
+
+  private async checkBiometric(
+    operationDescription: string
+  ): Promise<void> {
+    if (this.auth?.biometric?.isBiometricRequiredForDB()) {
+      const authorized = await this.auth.biometric.promptBiometric(
+        `Authorize sensitive database operation: ${operationDescription} in collection "${this.collectionName}"`
       );
+
+      if (!authorized) {
+        throw new ZerithDBError(
+          ErrorCode.AUTH_SIGN_FAILED,
+          "Database operation cancelled or biometric authentication failed."
+        );
+      }
+    }
+  }
+
+  private runValidation(data: unknown, batchIndex?: number): void {
+    if (!this.validatorRegistry) return;
+
+    const result = this.validatorRegistry.validate(
+      this.collectionName,
+      data
+    );
+
+    if (result.valid) return;
+
+    const prefix =
+      batchIndex !== undefined
+        ? `Batch validation failed at index ${batchIndex} in`
+        : `Validation failed in`;
+
+    const error = new SchemaValidationError(
+      ErrorCode.DB_VALIDATION_FAILED,
+      `${prefix} "${this.collectionName}": ${result.issues
+        .map((i) => i.message)
+        .join(", ")}`,
+      result.issues
+    );
+
+    this.onValidationError?.(error);
+
+    if (result.shouldThrow) {
+      throw error;
     }
   }
 
   /**
-   * Insert a new document into the collection.
-   * Automatically assigns `_id`, `_createdAt`, `_updatedAt`, `_vclock`, and `_lamport`.
+   * Subscribe to changes in the collection.
+   * Uses Dexie's liveQuery to reactively notify when documents change.
    */
+  subscribe(callback: (documents: Document<T>[]) => void): () => void {
+    const observable = liveQuery(() => this.find({}));
+
+    const subscription = observable.subscribe({
+      next: (docs) => callback(docs as Document<T>[]),
+      error: (err) =>
+        console.error(
+          `Subscription error in "${this.collectionName}":`,
+          err
+        ),
+    });
+
+    return () => subscription.unsubscribe();
+  }
 
   async insert(document: T): Promise<InsertResult> {
-    // Validate before touching the database
-    this.validateDoc(document);
+    if (document === null || document === undefined) {
+      throw new ZerithDBError(
+        ErrorCode.DB_WRITE_FAILED,
+        "Document cannot be null or undefined"
+      );
+    }
+
+    this.runValidation(document);
+    await this.checkBiometric("Insert Document");
 
     const now = Date.now();
-    const id = await this._generateId();
+    const id = uuidv7();
+
     const doc: Document<T> = {
       ...docToInsert,
       _id: id,
@@ -84,24 +217,32 @@ export class CollectionClient<
     );
   }
 
-  /**
-   * Insert multiple documents in a single atomic operation.
-   */
   async insertMany(documents: T[]): Promise<InsertResult[]> {
-    // Validate all documents before touching the database
-    for (const doc of documents) {
-      this.validateDoc(doc);
+    if (!Array.isArray(documents) || documents.length === 0) {
+      throw new ZerithDBError(
+        ErrorCode.DB_WRITE_FAILED,
+        "Documents must be a non-empty array"
+      );
+    }
+
+    await this.checkBiometric("Bulk Insert Documents");
+
+    for (let i = 0; i < documents.length; i++) {
+      const doc = documents[i];
+
+      if (doc === null || doc === undefined) {
+        throw new ZerithDBError(
+          ErrorCode.DB_WRITE_FAILED,
+          "Documents array cannot contain null or undefined"
+        );
+      }
+
+      this.runValidation(doc, i);
     }
 
     const now = Date.now();
 
-    // Generate all IDs up-front so each call to _generateId() runs in order
-    const ids: DocumentId[] = [];
-    for (let i = 0; i < documents.length; i++) {
-      ids.push(await this._generateId());
-    }
-
-    const docs = documents.map((doc, i) => ({
+    const docs = documents.map((doc) => ({
       ...doc,
       _id: ids[i]!,
       _createdAt: now,
@@ -121,10 +262,10 @@ export class CollectionClient<
       `Failed to bulk insert into collection "${this.collectionName}"`,
       async () => {
         await this.table.bulkAdd(docs);
-        for (const doc of docs) {
-          this.emit("mutation", { collectionName: this.collectionName, doc, type: "insert" });
-        }
-        return docs.map((d) => ({ id: d._id }));
+
+        return docs.map((d) => ({
+          id: d._id,
+        }));
       }
 
       return results;
@@ -139,25 +280,60 @@ export class CollectionClient<
 
   /**
    * Find documents matching a filter.
-   * Excludes documents marked as deleted by default.
+   * All filter fields are ANDed together.
    */
-  async find(filter: QueryFilter<T> = {}, options: QueryOptions<T> = {}): Promise<Document<T>[]> {
+  async find(
+    filter: QueryFilter<T> = {},
+    options: QueryOptions<T> = {}
+  ): Promise<Document<T>[]> {
     return wrapIDBOperation(
       ErrorCode.DB_READ_FAILED,
       `Failed to query collection "${this.collectionName}"`,
       async () => {
         const all = await this.table.toArray();
         const compiledFilter = this.precompileRegexes(filter);
-        return all.filter((doc) => !doc._deleted && this.matchesFilter(doc, compiledFilter));
+        const results: Document<T>[] = [];
+
+        await this.table.each((doc) => {
+          if (this.matchesFilter(doc, compiledFilter)) {
+            results.push(doc);
+          }
+        });
+
+        if (options.sort) {
+          const { field, order = "asc" } = options.sort;
+
+          results.sort((a, b) => {
+            const aValue = a[field];
+            const bValue = b[field];
+
+            if (aValue === bValue) return 0;
+
+            if (aValue == null) return 1;
+            if (bValue == null) return -1;
+
+            const comparison = String(aValue).localeCompare(
+              String(bValue),
+              undefined,
+              {
+                numeric: true,
+                sensitivity: "base",
+              }
+            );
+
+            return order === "desc" ? -comparison : comparison;
+          });
+        }
+
+        const skip = options.skip ?? options.offset ?? 0;
+        const limit = options.limit ?? Number.POSITIVE_INFINITY;
+
+        return results.slice(skip, skip + limit);
       }
     );
   }
 
-  /**
-   * Find a single document by its `_id`.
-   * Accepts both UUID strings and integer IDs.
-   */
-  async findById(id: DocumentId): Promise<Document<T> | undefined> {
+  async findById(id: string): Promise<Document<T> | undefined> {
     return wrapIDBOperation(
       ErrorCode.DB_READ_FAILED,
       `Failed to get document "${id}" from "${this.collectionName}"`,
@@ -170,13 +346,10 @@ export class CollectionClient<
     return this.restoreIpfsReferences(doc);
   }
 
-  /**
-   * Update documents matching a filter.
-   * Returns the number of updated documents.
-   */
-
-  async update(filter: QueryFilter<T>, spec: UpdateSpec<T>): Promise<number> {
-    // Validate spec (from upstream/main)
+  async update(
+    filter: QueryFilter<T>,
+    spec: UpdateSpec<T>
+  ): Promise<number> {
     if (
       !spec ||
       Object.keys(spec).length === 0 ||
@@ -188,47 +361,51 @@ export class CollectionClient<
         "Update spec cannot be empty. Must provide non-empty $set or $unset."
       );
     }
+
     await this.checkBiometric("Update Documents");
 
-    // Fix: call find() OUTSIDE the write wrap so read errors throw DB_READ_FAILED naturally
-    const matches = await this.find(filter);
-    const now = Date.now();
+    try {
+      const matches = await this.find(filter);
+      const now = Date.now();
 
-    // Wrap only the write operation to catch write failures as DB_WRITE_FAILED
-    return wrapIDBOperation(
-      ErrorCode.DB_WRITE_FAILED,
-      `Failed to update documents in "${this.collectionName}"`,
-      async () => {
-        await this.table.bulkPut(matches.map((doc) => this.applyUpdateSpec(doc, spec, now)));
-        return matches.length;
+      const updatedDocs = matches.map((doc) =>
+        this.applyUpdateSpec(doc, spec, now)
+      );
+
+      for (const doc of updatedDocs) {
+        this.runValidation(doc);
       }
-    );
+
+      await this.table.bulkPut(updatedDocs);
+
+      return matches.length;
+    } catch (err) {
+      if (
+        err instanceof SchemaValidationError ||
+        (err instanceof Error &&
+          err.name === "SchemaValidationError")
+      ) {
+        throw err;
+      }
+
+      throw new ZerithDBError(
+        ErrorCode.DB_WRITE_FAILED,
+        `Failed to update documents in "${this.collectionName}"`,
+        { cause: err }
+      );
+    }
   }
-  /**
-   * Logical delete documents matching a filter (tombstone).
-   * Returns the number of deleted documents.
-   */
 
   async delete(filter: QueryFilter<T>): Promise<number> {
+    await this.checkBiometric("Delete Documents");
+
     return wrapIDBOperation(
       ErrorCode.DB_DELETE_FAILED,
       `Failed to delete documents from "${this.collectionName}"`,
       async () => {
         const matches = await this.find(filter);
-        const now = Date.now();
 
-        const deletedDocs = matches.map((doc) => ({
-          ...doc,
-          _deleted: true,
-          _updatedAt: now,
-          _vclock: { ...doc._vclock, [this.peerId]: (doc._vclock[this.peerId] || 0) + 1 },
-          _lamport: Math.max(doc._lamport, now) + 1,
-        }));
-
-        await this.table.bulkPut(deletedDocs);
-        for (const doc of deletedDocs) {
-          this.emit("mutation", { collectionName: this.collectionName, doc, type: "delete" });
-        }
+        await this.table.bulkDelete(matches.map((d) => d._id));
 
         return matches.length;
       }
@@ -243,19 +420,9 @@ export class CollectionClient<
     }
   }
 
-  /**
-   * For internal use by SyncEngine to apply remote updates deterministically.
-   */
-  async applyRemoteUpdate(doc: Document<T>): Promise<void> {
-    await this.table.put(doc);
-    // Note: We don't emit "mutation" here to avoid echo loops in SyncEngine
-  }
-
-  /**
-   * Delete every document in the collection (Hard delete).
-   */
-
   async clearAll(): Promise<void> {
+    await this.checkBiometric("Clear Collection");
+
     return wrapIDBOperation(
       ErrorCode.DB_DELETE_FAILED,
       `Failed to clear collection "${this.collectionName}"`,
@@ -269,31 +436,35 @@ export class CollectionClient<
     );
   }
 
-  /**
-   * Count documents matching a filter.
-   */
+  async clear(): Promise<void> {
+    return this.clearAll();
+  }
+
   async count(filter: QueryFilter<T> = {}): Promise<number> {
-    const docs = await this.find(filter);
-    return docs.length;
+    return wrapIDBOperation(
+      ErrorCode.DB_READ_FAILED,
+      `Failed to count documents in "${this.collectionName}"`,
+      async () => {
+        const compiledFilter = this.precompileRegexes(filter);
+
+        let total = 0;
+
+        await this.table.each((doc) => {
+          if (this.matchesFilter(doc, compiledFilter)) {
+            total++;
+          }
+        });
+
+        return total;
+      }
+    );
   }
 
-  /**
-   * Returns the current value of the auto-increment counter for this
-   * collection (i.e. the `_id` of the most recently inserted document).
-   * Returns `0` if no documents have been inserted yet.
-   *
-   * Only meaningful when `idStrategy` is `"autoincrement"`.
-   */
-  async currentSequenceValue(): Promise<number> {
-    const record = await this.seqTable.get(this.collectionName);
-    return record?._lastId ?? 0;
-  }
-
-  // -------------------------------------------------------------------------
-  // Private implementation helpers
-  // -------------------------------------------------------------------------
-
-  private applyUpdateSpec(doc: Document<T>, spec: UpdateSpec<T>, updatedAt: number): Document<T> {
+  private applyUpdateSpec(
+    doc: Document<T>,
+    spec: UpdateSpec<T>,
+    updatedAt: number
+  ): Document<T> {
     const next = {
       ...doc,
       ...(spec.$set ?? {}),
@@ -311,20 +482,10 @@ export class CollectionClient<
     return next as Document<T>;
   }
 
-  private matchesFilter(doc: Document<T>, filter: QueryFilter<T>): boolean {
-    const validOperators = [
-      "$eq",
-      "$ne",
-      "$gt",
-      "$gte",
-      "$lt",
-      "$lte",
-      "$in",
-      "$nin",
-      "$regex",
-      "$exists",
-    ];
-
+  private matchesFilter(
+    doc: Document<T>,
+    filter: QueryFilter<T>
+  ): boolean {
     for (const [key, condition] of Object.entries(filter)) {
       const fieldValue = (doc as Record<string, any>)[key];
 
@@ -333,34 +494,162 @@ export class CollectionClient<
         continue;
       }
 
-      // Distinguish operator objects ({ $gt: 3 }) from plain object values ({ key: "v" }).
-      // Only treat as operators if at least one key starts with "$".
       const conditions = condition as Record<string, any>;
-      const isOperatorObject = Object.keys(conditions).some((k) => k.startsWith("$"));
+
+      const isOperatorObject = Object.keys(conditions).some((k) =>
+        k.startsWith("$")
+      );
 
       if (!isOperatorObject) {
-        // Deep equality check for plain object / array values
-        if (JSON.stringify(fieldValue) !== JSON.stringify(condition)) return false;
+        if (
+          JSON.stringify(fieldValue) !== JSON.stringify(condition)
+        ) {
+          return false;
+        }
+
         continue;
       }
 
-      if ("$eq" in conditions && fieldValue !== conditions["$eq"]) return false;
-      if ("$ne" in conditions && fieldValue === conditions["$ne"]) return false;
-      if ("$gt" in conditions && !((fieldValue as any) > (conditions["$gt"] as never)))
+      if (
+        "$eq" in conditions &&
+        fieldValue !== conditions["$eq"]
+      )
         return false;
-      if ("$gte" in conditions && !((fieldValue as any) >= (conditions["$gte"] as never)))
+
+      if (
+        "$ne" in conditions &&
+        fieldValue === conditions["$ne"]
+      )
         return false;
-      if ("$lt" in conditions && !((fieldValue as any) < (conditions["$lt"] as never)))
+
+      if (
+        "$gt" in conditions &&
+        !(fieldValue > conditions["$gt"])
+      )
         return false;
-      if ("$lte" in conditions && !((fieldValue as any) <= (conditions["$lte"] as never)))
+
+      if (
+        "$gte" in conditions &&
+        !(fieldValue >= conditions["$gte"])
+      )
         return false;
-      if ("$in" in conditions && !(conditions["$in"] as unknown[]).includes(fieldValue))
+
+      if (
+        "$lt" in conditions &&
+        !(fieldValue < conditions["$lt"])
+      )
         return false;
-      if ("$nin" in conditions && (conditions["$nin"] as unknown[]).includes(fieldValue))
+
+      if (
+        "$lte" in conditions &&
+        !(fieldValue <= conditions["$lte"])
+      )
         return false;
+
+      if (
+        "$in" in conditions &&
+        !(conditions["$in"] as unknown[]).includes(fieldValue)
+      )
+        return false;
+
+      if (
+        "$nin" in conditions &&
+        (conditions["$nin"] as unknown[]).includes(fieldValue)
+      )
+        return false;
+
+      if ("$exists" in conditions) {
+        const exists = key in doc;
+
+        if (conditions.$exists !== exists) {
+          return false;
+        }
+      }
+
+      if ("$regex" in conditions) {
+        if (typeof fieldValue !== "string") {
+          return false;
+        }
+
+        const regex = conditions.$regex;
+
+        if (!(regex instanceof RegExp)) {
+          return false;
+        }
+
+        regex.lastIndex = 0;
+
+        if (!regex.test(fieldValue)) {
+          return false;
+        }
+      }
     }
 
     return true;
+  }
+
+  private precompileRegexes(
+    filter: QueryFilter<T>
+  ): QueryFilter<T> {
+    const compiled: Record<string, any> = {};
+
+    for (const [key, condition] of Object.entries(filter)) {
+      if (condition !== null && typeof condition === "object") {
+        const conditions = {
+          ...condition,
+        } as Record<string, any>;
+
+        const isOperatorObject = Object.keys(conditions).some((k) =>
+          k.startsWith("$")
+        );
+
+        if (isOperatorObject && "$regex" in conditions) {
+          conditions["$regex"] =
+            this.compileRegexCondition(conditions);
+        }
+
+        compiled[key] = conditions;
+      } else {
+        compiled[key] = condition;
+      }
+    }
+
+    return compiled as QueryFilter<T>;
+  }
+
+  private compileRegexCondition(
+    conditions: Record<string, any>
+  ): RegExp | null {
+    const rawRegex = conditions.$regex;
+
+    const rawFlags =
+      typeof conditions.$flags === "string"
+        ? conditions.$flags
+        : typeof conditions.$options === "string"
+          ? conditions.$options
+          : undefined;
+
+    try {
+      if (rawRegex instanceof RegExp) {
+        if (!rawFlags) {
+          return rawRegex;
+        }
+
+        const mergedFlags = Array.from(
+          new Set((rawRegex.flags + rawFlags).split(""))
+        ).join("");
+
+        return new RegExp(rawRegex.source, mergedFlags);
+      }
+
+      if (typeof rawRegex === "string") {
+        return new RegExp(rawRegex, rawFlags);
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -369,119 +658,89 @@ export class CollectionClient<
 // ---------------------------------------------------------------------------
 
 /**
- * Internal Dexie subclass that manages dynamic collection creation.
- * Collections are added lazily via schema version upgrades.
- */
-class ZerithDBDexie extends Dexie {
-  private readonly tableMap = new Map<string, Table>();
-  private _currentSchema: Record<string, string> = {};
-  private _pendingVersion = 0;
-  private _seqStoreProvisioned = false;
-
-  constructor(appId: string) {
-    super(`zerithdb_${appId}`);
-  }
-
-  /**
-   * Ensure the sequence store exists (idempotent).
-   * Called lazily the first time `ensureCollection` runs.
-   */
-  private ensureSeqStore(): void {
-    if (this._seqStoreProvisioned) return;
-    this._seqStoreProvisioned = true;
-    this._currentSchema[SEQ_STORE] = "_collectionName";
-  }
-
-  /**
-   * Ensure a named collection exists, creating it via a Dexie version
-   * upgrade if it has not been registered yet.
-   *
-   * @param name - The collection name to create or retrieve
-   * @returns The Dexie {@link Table} handle for the collection
-   */
-  ensureCollection(name: string): Table {
-    this.ensureSeqStore();
-
-    if (!this.tableMap.has(name)) {
-      this._currentSchema[name] = "_id, _createdAt, _updatedAt, _lamport, _deleted";
-      this._currentSchema["_sync_logs"] = "++_id, collectionName, docId, timestamp";
-      
-      // We must increment the version for every new collection added dynamically
-      const nextVersion = Math.max(this.verno, this._pendingVersion) + 1;
-
-      this._pendingVersion = nextVersion;
-
-      if (this.isOpen()) {
-        this.close();
-      }
-
-      this.version(nextVersion).stores(this._currentSchema);
-
-      this.tableMap.set(name, this.table(name));
-      this.tableMap.set("_sync_logs", this.table("_sync_logs"));
-    }
-    return this.tableMap.get(name)!;
-  }
-
-  get syncLogs(): Table {
-    return this.table("_sync_logs");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// DbClient
-// ---------------------------------------------------------------------------
-
-/**
- * Internal database client. Wraps Dexie and manages collection instances.
- * Use via {@link ZerithDBApp.db} — not instantiated directly.
+ * Internal database client.
+ * Wraps Dexie and manages collection instances.
  */
 export class DbClient extends EventEmitter<{ "mutation": { collection: string } }> {
   private readonly dexie: ZerithDBDexie;
   private readonly appId: string;
 
-  private readonly collections = new Map<string, CollectionClient<any>>();
-  public readonly peerId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly collections = new Map<
+    string,
+    CollectionClient<any>
+  >();
 
-  constructor(config: ZerithDBConfig) {
+  private readonly graphs = new Map<string, GraphClient<any>>();
+
+  private validatorRegistry?: ValidatorRegistry;
+
+  constructor(
+    config: ZerithDBConfig,
+    private readonly auth?: any
+  ) {
     this.appId = config.appId;
     this.dexie = new ZerithDBDexie(config.appId);
     // Simplified peerId generation - in production this should be stable
     this.peerId = uuidv7();
   }
 
-  collection<T extends Record<string, any>>(name: string, options?: CollectionOptions<T>): CollectionClient<T> {
-    if (!this.collections.has(name)) {
-      const table = this.dexie.ensureCollection(name);
-      this.collections.set(
-        name,
-        new CollectionClient<T>(table as Table<Document<T>>, name, this.peerId)
+  setValidatorRegistry(registry: ValidatorRegistry): void {
+    this.validatorRegistry = registry;
+  }
+
+  collection<T extends Record<string, any>>(
+    name: string
+  ): CollectionClient<T> {
+    if (typeof name !== "string" || name.trim() === "") {
+      throw new ZerithDBError(
+        ErrorCode.DB_INIT_FAILED,
+        "Collection name must be a non-empty string"
       );
     }
-    const cacheKey = `${name}:${options.idStrategy ?? "uuid"}`;
 
-    if (!this.collections.has(cacheKey)) {
-      // Ensure the collection schema is registered now (idempotent after first call)
+    if (!this.collections.has(name)) {
       this.dexie.ensureCollection(name);
-      // Pass factory functions so CollectionClient always resolves the
-      // live Dexie Table reference — even after a schema-version upgrade
-      // caused by opening a second collection on the same DbClient.
-      const tableFn = () => this.dexie.table(name) as Table<Document<T>>;
-      const seqFn = () => this.dexie.table(SEQ_STORE) as Table<SequenceRecord>;
-      this.collections.set(cacheKey, new CollectionClient<T>(tableFn, name, seqFn, options));
+
+      this.collections.set(
+        name,
+        new CollectionClient<T>(
+          this.dexie,
+          name,
+          this.validatorRegistry,
+          undefined,
+          this.auth
+        )
+      );
     }
-    return this.collections.get(cacheKey) as CollectionClient<T>;
+
+    return this.collections.get(name) as CollectionClient<T>;
   }
 
-  async logConflict(log: any): Promise<void> {
-    await this.dexie.syncLogs.add(log);
+  graph<T extends Record<string, any> = Record<string, any>>(
+    name: string
+  ): GraphClient<T> {
+    if (!this.graphs.has(name)) {
+      const { nodesTable, edgesTable } =
+        this.dexie.ensureGraphTables(name);
+
+      this.graphs.set(
+        name,
+        new GraphClient<T>(
+          nodesTable as Table<GraphNode<T>>,
+          edgesTable as Table<GraphEdge>,
+          name
+        )
+      );
+    }
+
+    return this.graphs.get(name) as GraphClient<T>;
   }
 
-  async getSyncLogs(): Promise<any[]> {
-    return this.dexie.syncLogs.toArray();
-  }
-
-  async getMemoryStats(): Promise<{ recordCount: number; collections: Record<string, number> }> {
+  async getMemoryStats(): Promise<{
+    recordCount: number;
+    collections: Record<string, number>;
+  }> {
     const collections: Record<string, number> = {};
     let recordCount = 0;
 
@@ -502,28 +761,43 @@ export class DbClient extends EventEmitter<{ "mutation": { collection: string } 
     return [...new Set(Array.from(this.collections.keys()).map((k) => k.split(":")[0]!))];
   }
 
-  /**
-   * Returns names of all collections currently stored in IndexedDB.
-   * Excludes the internal sequence store.
-   */
   allCollectionNames(): string[] {
     return this.dexie.tables.map((t) => t.name).filter((name) => !name.startsWith("_"));
   }
 
-  async exportSnapshot(options: BackupExportOptions = {}): Promise<BackupSnapshot> {
+  async exportSnapshot(
+    options: BackupExportOptions = {}
+  ): Promise<BackupSnapshot> {
+    if (this.auth?.biometric?.isBiometricRequiredForDB()) {
+      const authorized =
+        await this.auth.biometric.promptBiometric(
+          "Authorize sensitive operation: Export full database backup snapshot"
+        );
+
+      if (!authorized) {
+        throw new ZerithDBError(
+          ErrorCode.AUTH_SIGN_FAILED,
+          "Database export cancelled or biometric authentication failed."
+        );
+      }
+    }
 
     return wrapIDBOperation(
       ErrorCode.DB_READ_FAILED,
       "Failed to export local backup snapshot",
       async () => {
-        const collectionNames = options.collections ?? this.allCollectionNames();
+        const collectionNames =
+          options.collections ?? this.allCollectionNames();
 
         const collections: BackupSnapshot["collections"] = {};
 
         for (const name of collectionNames) {
           const table = this.dexie.ensureCollection(name);
 
-          collections[name] = (await table.toArray()) as Document<Record<string, any>>[];
+          collections[name] =
+            (await table.toArray()) as Document<
+              Record<string, any>
+            >[];
         }
 
         return {
