@@ -9,6 +9,7 @@ import { lintCommand } from "./commands/lint.js";
 import { formatCommand } from "./commands/format.js";
 import { maintenanceCommand } from "./commands/maintenance.js";
 import { purgeCommand } from "./purge.js";
+import { inferCommand } from "./commands/infer.js";
 
 import { checkConnectivity } from "./checkConnectivity.js";
 
@@ -78,6 +79,17 @@ async function main() {
     .command("purge")
     .description("Purge all local ZerithDB data stored in the home directory")
     .action(purgeCommand);
+
+  // INFER
+  program
+    .command("infer <path>")
+    .description("Scan JSON and infer TypeScript & Zod schemas")
+    .option("--out <dir>", "Output directory")
+    .option("--name <schemaName>", "Schema name")
+    .option("--zod-only", "Generate only Zod schemas")
+    .option("--ts-only", "Generate only TypeScript interfaces")
+    .option("--pretty", "Format output with Prettier")
+    .action(inferCommand);
 
   program.parse(process.argv);
 }
