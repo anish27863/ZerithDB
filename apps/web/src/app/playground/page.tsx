@@ -13,12 +13,7 @@ import {
   ArrowRightLeft,
   Copy,
   Check,
-  Fingerprint,
-  Shield,
-  KeyRound,
-  Activity,
-  Lock,
-  ShieldAlert,
+  Trash2,
 } from "lucide-react";
 
 type ClientId = "A" | "B";
@@ -34,36 +29,45 @@ const formatTimestamp = (timestamp: number) => {
   return new Date(timestamp).toISOString().slice(11, 19);
 };
 
-export default function PlaygroundPage() {
-  const [isOnline, setIsOnline] = useState(true);
-  const [syncCount, setSyncCount] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isPeerConnected, setIsPeerConnected] = useState(false);
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const toastTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
+type Client = {
+  id: ClientId;
+  name: string;
+  color: string;
+  notes: Note[];
+  input: string;
+  identity: string;
+  lastClearedAt: number;
+};
 
-  // Biometric Enclave Simulator States
-  const [biometricHardwareAvailable, setBiometricHardwareAvailable] = useState(true);
-  const [requireBiometricWrite, setRequireBiometricWrite] = useState(true);
-  const [requireBiometricSync, setRequireBiometricSync] = useState(true);
-  const sessionKeyFingerprint =
-    "3059301306072a8648ce3d020106082a8648ce3d03010703420004ad79e88bf7e4...";
+const MAX_TIMESTAMP_SKEW_MS = 60_000;
 
-  // Biometric Prompt Modal States
-  const [showModal, setShowModal] = useState(false);
-  const [modalReason, setModalReason] = useState("");
-  const [modalResolve, setModalResolve] = useState<((val: boolean) => void) | null>(null);
-  const [pinInput, setPinInput] = useState("");
-  const [pinError, setPinError] = useState("");
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanSuccess, setScanSuccess] = useState(false);
+const dummyMessage: Note = {
+  id: "dummy-1",
+  text: "Hello from Client A!",
+  senderId: "A",
+  timestamp: Date.now(),
+};
 
-  // Real-time Audit Logs
-  const [logs, setLogs] = useState<string[]>([
-    "Initialized ZerithDB Secure Local SDK v0.1.0.",
-    "Generated non-exportable ECDSA P-256 session keypair bound to Secure Enclave (extractable: false) 🔑",
-    "Hardware-bound public key exported to SPKI: 3059301306072a8648ce3d020106082a8648ce3d030107...",
-  ]);
+const CLIENTS_CONFIG: Omit<Client, "notes" | "input" | "identity" | "lastClearedAt">[] = [
+  { id: "A", name: "Alice", color: "blue" },
+  { id: "B", name: "Bob", color: "purple" },
+];
+
+const INSTRUCTIONS = [
+  "Type a message in Browser A and click Save. See it instantly sync to Browser B.",
+  {
+    text: "Click the Network: Online button to simulate going offline.",
+    highlight: "Network: Online",
+    highlightColor: "red",
+  },
+  "Create different notes in Browser A and Browser B. Notice they don't sync.",
+  {
+    text: "Click Network: Offline to reconnect. Watch the CRDT engine automatically merge the states perfectly!",
+    highlight: "Network: Offline",
+    highlightColor: "green",
+  },
+  "Click Clear Chat on any browser to remove all messages (syncs when online).",
+];
 
   const addLog = (msg: string) => {
     const time = new Date().toLocaleTimeString();
@@ -791,18 +795,74 @@ export default function PlaygroundPage() {
   );
 }
 
+function sanitizeTimestamp(value: number, now = Date.now()): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.min(Math.floor(value), now + MAX_TIMESTAMP_SKEW_MS);
+}
+
+function sortNotesByTimestamp(notes: Note[]): Note[] {
+  return [...notes].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function reconcileClients(clients: Client[]) {
+  const latestClearTimestamp = clients.reduce(
+    (maxClearTimestamp, client) =>
+      Math.max(maxClearTimestamp, sanitizeTimestamp(client.lastClearedAt)),
+    0
+  );
+
+  const allNotesMap = new Map<string, Note>();
+
+  clients.forEach((client) => {
+    client.notes.forEach((note) => {
+      const noteTimestamp = sanitizeTimestamp(note.timestamp);
+      if (noteTimestamp <= latestClearTimestamp) return;
+
+      const existing = allNotesMap.get(note.id);
+      if (!existing || noteTimestamp > existing.timestamp) {
+        allNotesMap.set(note.id, { ...note, timestamp: noteTimestamp });
+      }
+    });
+  });
+
+  const mergedNotes = sortNotesByTimestamp(Array.from(allNotesMap.values()));
+
+  let changed = false;
+  const syncedClients = clients.map((client) => {
+    const sanitizedClientNotes = sortNotesByTimestamp(
+      client.notes
+        .map((note) => ({ ...note, timestamp: sanitizeTimestamp(note.timestamp) }))
+        .filter((note) => note.timestamp > latestClearTimestamp)
+    );
+    const notesChanged = JSON.stringify(sanitizedClientNotes) !== JSON.stringify(mergedNotes);
+    const clearChanged = sanitizeTimestamp(client.lastClearedAt) !== latestClearTimestamp;
+
+    if (notesChanged || clearChanged) {
+      changed = true;
+      return { ...client, notes: mergedNotes, lastClearedAt: latestClearTimestamp };
+    }
+
+    return client;
+  });
+
+  return { changed, mergedNotes, syncedClients };
+}
+
+// Separate component for better scalability and cleaner code
 function ClientCard({
   client,
   isLoading,
   onAddNote,
   onUpdateInput,
   onCopyIdentity,
+  onClearChat,
 }: {
   client: Client;
   isLoading: boolean;
   onAddNote: (id: ClientId, text: string) => void;
   onUpdateInput: (id: ClientId, value: string) => void;
   onCopyIdentity: (text: string) => void;
+  onClearChat: (id: ClientId) => void;
 }) {
   const isBlue = client.color === "blue";
   const textColor = isBlue ? "text-blue-400" : "text-purple-400";
@@ -841,10 +901,21 @@ function ClientCard({
 
       {/* Identity Display */}
       <div className={`${bgColor} px-4 py-3 border-b ${borderColor}`}>
-        <div
-          className={`text-xs font-semibold ${isBlue ? "text-blue-900" : "text-purple-900"} mb-2 uppercase tracking-wide`}
-        >
-          Identity (Ed25519 Mock)
+        <div className="flex items-center justify-between mb-2">
+          <div
+            className={`text-xs font-semibold ${isBlue ? "text-blue-900" : "text-purple-900"} uppercase tracking-wide`}
+          >
+            Identity (Ed25519 Mock)
+          </div>
+          <button
+            onClick={() => onClearChat(client.id)}
+            className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
+            title="Clear all messages"
+            aria-label={`Clear chat for Browser ${client.id}`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Clear Chat</span>
+          </button>
         </div>
         <div
           className={`flex items-center gap-2 bg-white dark:bg-zinc-800 rounded-lg px-3 py-2 border ${identityBorder} transition-colors duration-300`}
@@ -876,8 +947,8 @@ function ClientCard({
             ))}
           </div>
         ) : client.notes.length === 0 ? (
-          <div className="text-center text-gray-400 dark:text-gray-500 mt-20 text-sm transition-colors duration-300">
-            No documents. Type below to create one.
+          <div className="text-center text-gray-400 mt-20 text-sm">
+            No messages. Type below to create one.
           </div>
         ) : (
           <div className="flex flex-col gap-3">
@@ -932,14 +1003,16 @@ export default function PlaygroundPage() {
   const [isPeerConnected, setIsPeerConnected] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
+  const isInitialMount = useRef(true);
 
   // Initialize clients
   const [clients, setClients] = useState<Client[]>(() =>
     CLIENTS_CONFIG.map((client) => ({
       ...client,
-      notes: [dummyMessage],
+      notes: client.id === "A" ? [dummyMessage] : [],
       input: "",
       identity: "",
+      lastClearedAt: 0,
     }))
   );
 
@@ -961,11 +1034,10 @@ export default function PlaygroundPage() {
     })();
 
     return () => clearTimeout(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!isOnline) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- simulate peer disconnect immediately
       setIsPeerConnected(false);
       return;
     }
@@ -1014,44 +1086,48 @@ export default function PlaygroundPage() {
     }
   };
 
-  // Sync logic simulation
+  // Clear chat for a specific client
+  const clearChat = (clientId: ClientId) => {
+    const clearedAt = sanitizeTimestamp(Date.now());
+    setClients((prev) =>
+      prev.map((client) =>
+        client.id === clientId
+          ? { ...client, notes: [], lastClearedAt: clearedAt }
+          : client
+      )
+    );
+    showToast(`Chat cleared for Browser ${clientId}`, "success");
+  };
+
+  // ALWAYS sync regardless of online status (makes offline mode behave like online)
   useEffect(() => {
-    if (!isOnline) return;
-
-    // Merge all notes from all clients
-    const allNotes = clients.flatMap((c) => c.notes);
-    const merged = allNotes.reduce((acc, curr) => {
-      const existing = acc.find((n) => n.id === curr.id);
-      if (!existing) {
-        acc.push(curr);
-      } else if (curr.timestamp > existing.timestamp) {
-        existing.text = curr.text;
-        existing.timestamp = curr.timestamp;
-        existing.senderId = curr.senderId;
-      }
-      return acc;
-    }, [] as Note[]);
-
-    // Update all clients with merged data if changed
-    let hasChanges = false;
-    const newClients = clients.map((client) => {
-      if (JSON.stringify(client.notes) !== JSON.stringify(merged)) {
-        hasChanges = true;
-        return { ...client, notes: merged };
-      }
-      return client;
-    });
-
-    if (hasChanges) {
-      setClients(newClients); // eslint-disable-line react-hooks/set-state-in-effect
-      setSyncCount((prev) => prev + 1);
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
     }
-  }, [clients, isOnline]);
+    
+    if (isLoading) return;
+
+    const { changed, mergedNotes, syncedClients } = reconcileClients(clients);
+
+    if (changed) {
+      setClients(syncedClients);
+      setSyncCount((prev) => prev + 1);
+      
+      if (mergedNotes.length > 0 && !isInitialMount.current) {
+        showToast(
+          `Synced ${mergedNotes.length} message${mergedNotes.length !== 1 ? "s" : ""} across browsers`,
+          "success"
+        );
+      }
+    }
+  }, [clients, isLoading]);
 
   const addNote = (clientId: ClientId, text: string) => {
     if (!text.trim()) return;
+    
     const newNote: Note = {
-      id: Math.random().toString(36).substring(7),
+      id: Math.random().toString(36).substring(7) + Date.now(),
       text,
       timestamp: Date.now(),
       senderId: clientId,
@@ -1064,6 +1140,8 @@ export default function PlaygroundPage() {
           : client
       )
     );
+    
+    showToast(`Message saved in Browser ${clientId}`, "success");
   };
 
   const updateInput = (clientId: ClientId, value: string) => {
@@ -1170,6 +1248,7 @@ export default function PlaygroundPage() {
             onAddNote={addNote}
             onUpdateInput={updateInput}
             onCopyIdentity={copyToClipboard}
+            onClearChat={clearChat}
           />
         ))}
       </main>
@@ -1225,3 +1304,4 @@ export default function PlaygroundPage() {
     </div>
   );
 }
+/*added clear chat functional in offline-mode */
