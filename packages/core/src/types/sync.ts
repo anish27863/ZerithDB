@@ -99,74 +99,48 @@ export interface SyncPlugin {
   ) => Uint8Array | null | Promise<Uint8Array | null>;
 }
 
-// ─── Video-conference types ───────────────────────────────────────────────────
-// Used by the VideoConferenceManager in zerithdb-sdk.
+/** Ephemeral Presence state for a peer. */
+export interface EphemeralPeerState<
+  TState extends Record<string, unknown> = Record<string, unknown>,
+> {
+  peerId: string;
+  state: TState;
+  sequence: number;
+  updatedAt: number;
+}
 
-/** Metadata about a single MediaStreamTrack within a published stream. */
-export interface MediaTrackInfo {
-  /** The RTCDataChannel track kind: "audio" or "video" */
+export interface MediaStreamTrackMetadata {
+  trackId: string;
   kind: "audio" | "video";
-  /** Whether this specific track is currently muted */
+  label: string;
+  enabled: boolean;
   muted: boolean;
-  /** Whether the track is enabled (not forcibly disabled) */
-  enabled?: boolean;
-  /** Optional track label */
-  label?: string;
-  /** Optional track ID */
-  trackId?: string;
-  /** Track readyState if available */
-  readyState?: string;
+  readyState: string;
 }
 
-/**
- * Metadata attached to a published MediaStream.
- * Exchanged via the ephemeral state channel — never persisted.
- */
 export interface MediaStreamMetadata {
-  /** Opaque identifier matching `MediaStream.id` */
   streamId: string;
-  /** Optional human-readable label (e.g. "camera", "screen") */
-  label?: string;
-  /** Whether the audio tracks in this stream are muted */
+  peerId: string;
+  kind: "camera" | "screen" | "custom";
   audioMuted: boolean;
-  /** Whether the video tracks in this stream are muted */
   videoMuted: boolean;
-  /** Per-track details */
-  tracks: MediaTrackInfo[];
-  /** Arbitrary extra fields for application-specific metadata */
-  [key: string]: unknown;
+  tracks: MediaStreamTrackMetadata[];
+  updatedAt: number;
 }
 
-/**
- * Input type for publishing a stream — all fields are optional
- * since they default to the MediaStream's own properties.
- */
-export type MediaStreamMetadataInput = Partial<Pick<MediaStreamMetadata, "label">> &
-  Record<string, unknown>;
-
-/** Identifies the current active speaker in a video call. */
 export interface ActiveSpeakerState {
-  /** Peer ID of the speaker */
   peerId: string;
-  /** Unix millisecond timestamp of when this peer became active speaker */
-  updatedAt: number;
-  /** Optional audio level (0–1) at the time of detection */
   audioLevel?: number;
+  updatedAt: number;
 }
 
-/**
- * Full presence state for a video call participant.
- * Broadcast via ephemeral state — never written to IndexedDB.
- */
 export interface VideoParticipantState {
-  /** Peer ID of this participant */
   peerId: string;
-  /** Audio/video mute summary (aggregated across all streams) */
-  muted: { audio: boolean; video: boolean };
-  /** Published streams keyed by streamId */
+  muted: {
+    audio: boolean;
+    video: boolean;
+  };
   streams: Record<string, MediaStreamMetadata>;
-  /** Unix millisecond timestamp of the last state change */
-  updatedAt: number;
-  /** Set when this participant is the active speaker */
   activeSpeaker?: ActiveSpeakerState;
+  updatedAt: number;
 }

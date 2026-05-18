@@ -46,7 +46,19 @@ transport?: "auto" | "websocket" | "polling";
    * Configuration for the {@link EphemeralStateManager}.
    * Controls broadcast throttling and stale-peer cleanup timing.
    */
+  transport?: "auto" | "websocket" | "polling";
+
+  /** Ephemeral Presence sharing configuration options. */
   ephemeral?: EphemeralConfig;
+}
+
+export interface EphemeralConfig {
+  /** How often (in ms) to check for and prune stale remote peers @default 5000 */
+  cleanupIntervalMs?: number;
+  /** Delay (in ms) to throttle outgoing presence broadcasts @default 0 */
+  throttleMs?: number;
+  /** Inactive duration (in ms) after which a peer is treated as stale and pruned @default 30000 */
+  staleAfterMs?: number;
 }
 
 export interface AuthConfig {
