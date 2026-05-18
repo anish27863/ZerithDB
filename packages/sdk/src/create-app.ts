@@ -1,6 +1,6 @@
 import { Logger } from "zerithdb-core";
-import type { Document, Identity, QueryFilter, SyncState, ZerithDBConfig, MediaStreamMetadata } from "zerithdb-core";
-export type { Document, Identity, QueryFilter, SyncState, ZerithDBConfig, MediaStreamMetadata };
+import type { Document, Identity, QueryFilter, SyncState, ZerithDBConfig, InsertResult, PeerInfo, UpdateSpec } from "zerithdb-core";
+export type { Document, Identity, QueryFilter, SyncState, ZerithDBConfig, InsertResult, PeerInfo, UpdateSpec };
 import { MemoryCollector, estimateStorageBytes } from "zerithdb-devtools";
 import { ZerithDBError, ErrorCode } from "zerithdb-core";
 import { DbClient, CollectionClient } from "./db-client.js";
@@ -30,6 +30,7 @@ export interface ZerithDBApp {
    * ```
    */
   db<T extends Record<string, any> = Record<string, any>>(name: string): CollectionClient<T>;
+  dbClient: DbClient;
 
   /** CRDT sync engine — manages Yjs documents and P2P update propagation */
   sync: SyncEngine;
@@ -194,9 +195,9 @@ export function createApp(config: ZerithDBConfig): ZerithDBApp {
       return db.collection<T>(name);
     },
 
-    get sync() {
-      return getSync();
-    },
+    dbClient: db,
+
+    sync,
     auth,
     network,
 

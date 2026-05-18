@@ -10,6 +10,7 @@ import type {
 } from "zerithdb-core";
 import { ZerithDBError, ErrorCode } from "zerithdb-core";
 import { wrapIDBOperation } from "./internal/wrap-idb-operation.js";
+import { EventEmitter } from "zerithdb-core";
 import type { BackupExportOptions, BackupSnapshot } from "./backup.js";
 import { GraphClient } from "./graph-client.js";
 import type { GraphNode, GraphEdge } from "zerithdb-core";
@@ -27,9 +28,7 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
   constructor(
     private readonly table: Table<Document<T>>,
     private readonly collectionName: string,
-    private readonly appId: string,
-    private readonly getAuth: () => AuthManager | undefined,
-    private readonly getCapability: () => UCAN | undefined
+    private readonly notifyMutation?: () => void
   ) {}
 
   subscribe(callback: (documents: Document<T>[]) => void): () => void {
@@ -75,6 +74,7 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
       `Failed to insert into collection "${this.collectionName}"`,
       async () => {
         await this.table.add(doc);
+        this.notifyMutation?.();
         return { id };
       }
     );
@@ -123,6 +123,7 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
       `Failed to bulk insert into collection "${this.collectionName}"`,
       async () => {
         await this.table.bulkAdd(docs);
+        this.notifyMutation?.();
         return docs.map((d) => ({ id: d._id }));
       }
     );
@@ -243,9 +244,8 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
         }
 
         const now = Date.now();
-        await this.table.bulkPut(
-          matches.map((doc) => this.applyUpdateSpec(doc, processedSpec, now))
-        );
+        await this.table.bulkPut(matches.map((doc) => this.applyUpdateSpec(doc, spec, now)));
+        this.notifyMutation?.();
         return matches.length;
       }
     );
@@ -261,6 +261,7 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
         // Use raw find to avoid loading from IPFS during delete query
         const matches = await this.find(filter, {}, false);
         await this.table.bulkDelete(matches.map((d) => d._id));
+        this.notifyMutation?.();
         return matches.length;
       }
     );
@@ -272,7 +273,10 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
     return wrapIDBOperation(
       ErrorCode.DB_DELETE_FAILED,
       `Failed to clear collection "${this.collectionName}"`,
-      () => this.table.clear()
+      async () => {
+        await this.table.clear();
+        this.notifyMutation?.();
+      }
     );
   }
 
@@ -505,17 +509,18 @@ class ZerithDBDexie extends Dexie {
   }
 }
 
-// DbClient (corrected)
-export class DbClient {
+/**
+ * Internal database client. Wraps Dexie and manages collection instances.
+ * Use via {@link ZerithDBApp.db} — not instantiated directly.
+ */
+export class DbClient extends EventEmitter<{ "mutation": { collection: string } }> {
   private readonly dexie: ZerithDBDexie;
   private readonly appId: string;
   private readonly collections = new Map<string, CollectionClient<any>>();
   private readonly graphs = new Map<string, GraphClient<any>>();
 
-  private authManager?: AuthManager;
-  private currentCapability?: UCAN;
-
   constructor(config: ZerithDBConfig) {
+    super();
     this.appId = config.appId;
     this.dexie = new ZerithDBDexie(config.appId);
     if (config.ipfs?.enabled) {
@@ -544,18 +549,13 @@ export class DbClient {
     }
     if (!this.collections.has(name)) {
       const table = this.dexie.ensureCollection(name);
-      const getAuth = () => this.authManager;
-      const getCapability = () => this.currentCapability;
-      this.collections.set(
+      this.collections.set(name, new CollectionClient<T>(
+        table as Table<Document<T>>, 
         name,
-        new CollectionClient<T>(
-          table as Table<Document<T>>,
-          name,
-          this.appId,
-          getAuth,
-          getCapability
-        )
-      );
+        () => {
+          this.emit("mutation", { collection: name });
+        }
+      ));
     }
     return this.collections.get(name) as CollectionClient<T>;
   }
@@ -628,6 +628,9 @@ export class DbClient {
   }
 
   async dispose(): Promise<void> {
+    // Remove all EventEmitter listeners before closing to prevent memory leaks
+    // from dangling references to this DbClient instance after disposal.
+    this.removeAllListeners();
     this.dexie.close();
   }
 }
