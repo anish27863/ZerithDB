@@ -95,7 +95,6 @@ async function main() {
 }
 
 main().catch((err) => {
-
   console.error(chalk.red("\nUnexpected CLI error"));
 
   if (err instanceof Error) {

@@ -412,14 +412,21 @@ export default function PlaygroundPage() {
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <label htmlFor="security-hardware-toggle" className="text-xs font-semibold text-gray-700 block">Biometric Hardware Support</label>
+                  <label
+                    htmlFor="security-hardware-toggle"
+                    className="text-xs font-semibold text-gray-700 block"
+                  >
+                    Biometric Hardware Support
+                  </label>
                   <span className="text-[10px] text-gray-400">Simulate TouchID/FaceID Enclave</span>
                 </div>
                 <button
                   id="security-hardware-toggle"
                   onClick={() => {
                     setBiometricHardwareAvailable(!biometricHardwareAvailable);
-                    addLog(`Hardware toggle: Simulated biometrics ${!biometricHardwareAvailable ? "ENABLED" : "DISABLED (PIN Fallback Active)"}.`);
+                    addLog(
+                      `Hardware toggle: Simulated biometrics ${!biometricHardwareAvailable ? "ENABLED" : "DISABLED (PIN Fallback Active)"}.`
+                    );
                   }}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
                     biometricHardwareAvailable ? "bg-black" : "bg-gray-200"
@@ -435,14 +442,23 @@ export default function PlaygroundPage() {
 
               <div className="flex items-center justify-between border-t border-gray-100 pt-3">
                 <div>
-                  <label htmlFor="security-policy-write-toggle" className="text-xs font-semibold text-gray-700 block">DB Operations Policy</label>
-                  <span className="text-[10px] text-gray-400">Require fingerprint prompt on write</span>
+                  <label
+                    htmlFor="security-policy-write-toggle"
+                    className="text-xs font-semibold text-gray-700 block"
+                  >
+                    DB Operations Policy
+                  </label>
+                  <span className="text-[10px] text-gray-400">
+                    Require fingerprint prompt on write
+                  </span>
                 </div>
                 <button
                   id="security-policy-write-toggle"
                   onClick={() => {
                     setRequireBiometricWrite(!requireBiometricWrite);
-                    addLog(`DB policy toggle: Biometric write verification ${!requireBiometricWrite ? "ACTIVE" : "INACTIVE"}.`);
+                    addLog(
+                      `DB policy toggle: Biometric write verification ${!requireBiometricWrite ? "ACTIVE" : "INACTIVE"}.`
+                    );
                   }}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
                     requireBiometricWrite ? "bg-black" : "bg-gray-200"
@@ -458,14 +474,23 @@ export default function PlaygroundPage() {
 
               <div className="flex items-center justify-between border-t border-gray-100 pt-3">
                 <div>
-                  <label htmlFor="security-policy-sync-toggle" className="text-xs font-semibold text-gray-700 block">WebRTC Payload Signing</label>
-                  <span className="text-[10px] text-gray-400">Sign outgoing replication packets</span>
+                  <label
+                    htmlFor="security-policy-sync-toggle"
+                    className="text-xs font-semibold text-gray-700 block"
+                  >
+                    WebRTC Payload Signing
+                  </label>
+                  <span className="text-[10px] text-gray-400">
+                    Sign outgoing replication packets
+                  </span>
                 </div>
                 <button
                   id="security-policy-sync-toggle"
                   onClick={() => {
                     setRequireBiometricSync(!requireBiometricSync);
-                    addLog(`WebRTC policy toggle: Outbound payload signing ${!requireBiometricSync ? "ACTIVE" : "INACTIVE"}.`);
+                    addLog(
+                      `WebRTC policy toggle: Outbound payload signing ${!requireBiometricSync ? "ACTIVE" : "INACTIVE"}.`
+                    );
                   }}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
                     requireBiometricSync ? "bg-black" : "bg-gray-200"
@@ -563,19 +588,29 @@ export default function PlaygroundPage() {
             {biometricHardwareAvailable ? (
               /* FaceID / TouchID scan interface */
               <div className="w-full flex flex-col items-center">
-                <div className={`w-20 h-20 rounded-full flex items-center justify-center ${
-                  scanSuccess ? "bg-green-500" : isScanning ? "bg-black animate-pulse" : "bg-black/5"
-                } mb-6 transition-all duration-300`}>
-                  <Fingerprint className={`w-10 h-10 ${
-                    scanSuccess ? "text-white scale-110" : isScanning ? "text-white animate-bounce" : "text-black"
-                  } transition-all`} />
+                <div
+                  className={`w-20 h-20 rounded-full flex items-center justify-center ${
+                    scanSuccess
+                      ? "bg-green-500"
+                      : isScanning
+                        ? "bg-black animate-pulse"
+                        : "bg-black/5"
+                  } mb-6 transition-all duration-300`}
+                >
+                  <Fingerprint
+                    className={`w-10 h-10 ${
+                      scanSuccess
+                        ? "text-white scale-110"
+                        : isScanning
+                          ? "text-white animate-bounce"
+                          : "text-black"
+                    } transition-all`}
+                  />
                 </div>
                 <h3 className="text-lg font-bold text-gray-900">
                   {scanSuccess ? "Biometric Verification Success" : "Secure Enclave Request"}
                 </h3>
-                <p className="text-xs text-gray-500 mt-2 max-w-sm px-4">
-                  {modalReason}
-                </p>
+                <p className="text-xs text-gray-500 mt-2 max-w-sm px-4">{modalReason}</p>
                 <div className="mt-6 flex flex-col gap-2 w-full">
                   {!scanSuccess && (
                     <button
@@ -602,19 +637,21 @@ export default function PlaygroundPage() {
                 <div className="w-16 h-16 rounded-full bg-yellow-50 flex items-center justify-center mb-6">
                   <ShieldAlert className="w-8 h-8 text-yellow-800" />
                 </div>
-                <h3 className="text-lg font-bold text-gray-900">
-                  Hardware Unavailable
-                </h3>
+                <h3 className="text-lg font-bold text-gray-900">Hardware Unavailable</h3>
                 <p className="text-xs text-gray-500 mt-2 px-4 leading-relaxed">
-                  TouchID/FaceID enclave is currently locked or unavailable. Please enter your secure PIN below to authorize the database operation.
+                  TouchID/FaceID enclave is currently locked or unavailable. Please enter your
+                  secure PIN below to authorize the database operation.
                 </p>
                 <div className="bg-yellow-50 border border-yellow-100 text-yellow-800 text-[10px] font-semibold px-3 py-1.5 rounded-lg mt-3">
-                  Simulated Security PIN is <code className="bg-yellow-100 px-1 py-0.5 rounded font-mono">1234</code>
+                  Simulated Security PIN is{" "}
+                  <code className="bg-yellow-100 px-1 py-0.5 rounded font-mono">1234</code>
                 </div>
 
                 <form onSubmit={handlePinSubmit} className="mt-6 w-full flex flex-col gap-4">
                   <div className="w-full">
-                    <label htmlFor="biometric-pin-input" className="sr-only">Enter secure security PIN</label>
+                    <label htmlFor="biometric-pin-input" className="sr-only">
+                      Enter secure security PIN
+                    </label>
                     <input
                       id="biometric-pin-input"
                       type="password"
@@ -729,10 +766,14 @@ function ClientCard({
 
       {/* Identity Display */}
       <div className={`${bgColor} px-4 py-3 border-b ${borderColor}`}>
-        <div className={`text-xs font-semibold ${isBlue ? "text-blue-900" : "text-purple-900"} mb-2 uppercase tracking-wide`}>
+        <div
+          className={`text-xs font-semibold ${isBlue ? "text-blue-900" : "text-purple-900"} mb-2 uppercase tracking-wide`}
+        >
           Identity (Ed25519 Mock)
         </div>
-        <div className={`flex items-center gap-2 bg-white rounded-lg px-3 py-2 border ${identityBorder}`}>
+        <div
+          className={`flex items-center gap-2 bg-white rounded-lg px-3 py-2 border ${identityBorder}`}
+        >
           <code className={`text-xs ${identityText} font-mono flex-1 truncate`}>
             {client.identity || "(generating...)"}
           </code>

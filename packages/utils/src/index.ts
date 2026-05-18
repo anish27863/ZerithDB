@@ -140,3 +140,12 @@ export async function withTimeout<T>(
 export function randomId(): string {
   return crypto.randomUUID();
 }
+
+// ─── Query Translation ────────────────────────────────────────────────────────
+
+export {
+  translateNaturalQuery,
+  parseOfflineNaturalQuery,
+  type QueryTranslationProvider,
+  type QueryTranslatorOptions,
+} from "./query-translator.js";
