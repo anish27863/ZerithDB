@@ -1,293 +1,208 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+/**
+ * Unit tests for opt-in schema validation via CollectionClient.withSchema()
+ *
+ * These tests use a minimal hand-rolled schema to avoid requiring `zod`
+ * as an install-time dependency in the test environment.
+ * Tests cover: valid/invalid insert, valid/invalid update, and no-schema behavior.
+ */
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import "fake-indexeddb/auto";
-import { z } from "zod";
-import * as Y from "yjs";
-import { ValidatorRegistry, SchemaValidationError, ErrorCode } from "zerithdb-core";
-import { DbClient } from "zerithdb-db";
-import { SyncEngine } from "zerithdb-sync";
-import { NetworkManager } from "zerithdb-network";
-import { AuthManager } from "zerithdb-auth";
-import type { ZerithDBConfig } from "zerithdb-core";
+import { DbClient } from "../../packages/db/src/db-client.js";
+import { ZerithValidationError } from "../../packages/core/src/index.js";
+import type { ZerithDBConfig } from "../../packages/core/src/index.js";
 
-function createTestConfig(): ZerithDBConfig {
+// ---------------------------------------------------------------------------
+// Minimal mock schema — mimics the Zod `parse()` interface
+// ---------------------------------------------------------------------------
+
+interface MockIssue {
+  path: string[];
+  message: string;
+}
+
+function createMockSchema<T>(
+  validator: (
+    data: unknown,
+    isPartial: boolean
+  ) => { ok: true; value: T } | { ok: false; errors: MockIssue[] },
+  isPartial = false
+) {
   return {
-    appId: "test-schema-" + Math.random().toString(36).slice(2),
+    parse(data: unknown): T {
+      const result = validator(data, isPartial);
+      if (result.ok) return result.value;
+      // Throw a Zod-shaped error so CollectionClient can detect it
+      const err = new Error("Validation failed") as Error & { errors: MockIssue[] };
+      err.errors = result.errors;
+      throw err;
+    },
+    partial() {
+      return createMockSchema(validator, true);
+    },
   };
 }
 
-describe("Schema Validation Infrastructure", () => {
-  describe("ValidatorRegistry", () => {
-    it("should allow registering a schema and retrieving it", () => {
-      const registry = new ValidatorRegistry();
-      const schema = z.object({ name: z.string() });
-      registry.register("users", schema, "strict");
+// A schema that requires { name: string; age: number }
+type UserDoc = { name: string; age: number };
+const userSchema = createMockSchema<UserDoc>((data, isPartial) => {
+  const d = data as Record<string, unknown>;
+  const errors: MockIssue[] = [];
 
-      const reg = registry.get("users");
-      expect(reg?.schema).toBe(schema);
-      expect(reg?.mode).toBe("strict");
+  if (!isPartial || "name" in d) {
+    if (typeof d["name"] !== "string") errors.push({ path: ["name"], message: "Expected string" });
+  }
+  if (!isPartial || "age" in d) {
+    if (typeof d["age"] !== "number") errors.push({ path: ["age"], message: "Expected number" });
+  }
+
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, value: d as UserDoc };
+});
+
+// ---------------------------------------------------------------------------
+// Test suite
+// ---------------------------------------------------------------------------
+
+describe("CollectionClient — withSchema() validation", () => {
+  let db: DbClient;
+
+  beforeEach(() => {
+    const uniqueAppId = "test-schema-" + Math.random().toString(36).slice(2);
+    db = new DbClient({ appId: uniqueAppId });
+  });
+
+  afterEach(async () => {
+    await db.dispose();
+  });
+
+  // ── insert ────────────────────────────────────────────────────────────────
+
+  describe("insert()", () => {
+    it("should succeed when inserting a valid document", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
+      const result = await users.insert({ name: "Alice", age: 30 });
+      expect(result.id).toBeDefined();
+      expect(typeof result.id).toBe("string");
     });
 
-    it("should allow re-registering the EXACT SAME schema instance (idempotency)", () => {
-      const registry = new ValidatorRegistry();
-      const schema = z.object({ name: z.string() });
+    it("should throw ZerithValidationError when inserting an invalid document", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
 
-      registry.register("users", schema, "strict");
-      expect(() => registry.register("users", schema, "strict")).not.toThrow();
+      try {
+        await users.insert({ name: 42, age: "not-a-number" } as unknown as UserDoc);
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        expect(err.name).toBe("ZerithValidationError");
+      }
     });
 
-    it("should THROW when registering a different schema instance for the same collection", () => {
-      const registry = new ValidatorRegistry();
-      const schema1 = z.object({ name: z.string() });
-      const schema2 = z.object({ name: z.string() });
+    it("should include meaningful field-level issue messages on invalid insert", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
 
-      registry.register("users", schema1, "strict");
-      expect(() => registry.register("users", schema2, "strict")).toThrow(/Schema conflict/);
-    });
+      let caught: any = null;
+      try {
+        await users.insert({ name: 99, age: "oops" } as unknown as UserDoc);
+      } catch (err) {
+        caught = err;
+      }
 
-    it("should allow updating a schema reference and mode for a collection", () => {
-      const registry = new ValidatorRegistry();
-      const schema1 = z.object({ name: z.string() });
-      const schema2 = z.object({ age: z.number() });
-
-      registry.register("users", schema1, "strict");
-      expect(() => registry.update("users", schema2, "warn")).not.toThrow();
-
-      const reg = registry.get("users");
-      expect(reg?.schema).toBe(schema2);
-      expect(reg?.mode).toBe("warn");
-    });
-
-    it("should default validation mode to strict when updating/registering and mode is omitted", () => {
-      const registry = new ValidatorRegistry();
-      const schema1 = z.object({ name: z.string() });
-      const schema2 = z.object({ age: z.number() });
-
-      registry.register("users", schema1);
-      expect(registry.get("users")?.mode).toBe("strict");
-
-      registry.update("users", schema2);
-      expect(registry.get("users")?.mode).toBe("strict");
-    });
-
-    it("should allow removing a schema for a collection", () => {
-      const registry = new ValidatorRegistry();
-      const schema = z.object({ name: z.string() });
-
-      registry.register("users", schema, "strict");
-      expect(registry.has("users")).toBe(true);
-
-      const removed = registry.remove("users");
-      expect(removed).toBe(true);
-      expect(registry.has("users")).toBe(false);
-      expect(registry.get("users")).toBeUndefined();
-
-      const removedAgain = registry.remove("users");
-      expect(removedAgain).toBe(false);
+      expect(caught).not.toBeNull();
+      expect(caught.name).toBe("ZerithValidationError");
+      expect(caught.issues.some((i: any) => i.path === "name")).toBe(true);
+      expect(caught.issues.some((i: any) => i.path === "age")).toBe(true);
     });
   });
 
-  describe("Local Writes (DbClient)", () => {
-    let db: DbClient;
-    let registry: ValidatorRegistry;
-    const TodoSchema = z.object({
-      text: z.string().min(3),
-      done: z.boolean(),
+  // ── insertMany ────────────────────────────────────────────────────────────
+
+  describe("insertMany()", () => {
+    it("should succeed when all documents are valid", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
+      const results = await users.insertMany([
+        { name: "Bob", age: 25 },
+        { name: "Carol", age: 35 },
+      ]);
+      expect(results).toHaveLength(2);
     });
 
-    beforeEach(() => {
-      registry = new ValidatorRegistry();
-      db = new DbClient(createTestConfig());
-      db.setValidatorRegistry(registry);
-    });
-
-    afterEach(async () => {
-      await db.dispose();
-    });
-
-    it("should allow valid inserts", async () => {
-      registry.register("todos", TodoSchema, "strict");
-      const todos = db.collection("todos");
-
-      await expect(todos.insert({ text: "Buy milk", done: false })).resolves.toBeDefined();
-    });
-
-    it("should throw SchemaValidationError on invalid insert (strict mode)", async () => {
-      registry.register("todos", TodoSchema, "strict");
-      const todos = db.collection("todos");
+    it("should throw ZerithValidationError if any document in the batch is invalid", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
 
       try {
-        await todos.insert({ text: "hi", done: "maybe" } as any);
+        await users.insertMany([
+          { name: "Dave", age: 40 },
+          { name: 0, age: "bad" } as unknown as UserDoc,
+        ]);
         expect.fail("Should have thrown");
       } catch (err: any) {
-        expect(err.name).toBe("SchemaValidationError");
-        expect(err.code).toBe(ErrorCode.DB_VALIDATION_FAILED);
-        expect(err.issues).toHaveLength(2);
+        expect(err.name).toBe("ZerithValidationError");
       }
-    });
-
-    it("should NOT throw but call onValidationError in warn mode", async () => {
-      const onWarn = vi.fn();
-      registry.register("todos", TodoSchema, "warn");
-
-      const todos = db.collection("todos");
-      (todos as any).onValidationError = onWarn;
-
-      await todos.insert({ text: "hi", done: false });
-
-      expect(onWarn).toHaveBeenCalled();
-      const error = onWarn.mock.calls[0]![0];
-      expect(error.name).toBe("SchemaValidationError");
-
-      const docs = await todos.find({});
-      expect(docs).toHaveLength(1);
-    });
-
-    it("should validate all documents in insertMany and reject atomically (strict)", async () => {
-      registry.register("todos", TodoSchema, "strict");
-      const todos = db.collection("todos");
-
-      const batch = [
-        { text: "No", done: false }, // invalid first to ensure nothing added
-        { text: "Valid 2", done: false },
-      ];
-
-      await expect(todos.insertMany(batch as any)).rejects.toThrow();
-
-      const count = await todos.count();
-      expect(count).toBe(0);
-    });
-
-    it("should validate merged state during update()", async () => {
-      registry.register("todos", TodoSchema, "strict");
-      const todos = db.collection("todos");
-
-      await todos.insert({ text: "Original", done: false });
-
-      try {
-        await todos.update({ text: "Original" }, { $set: { text: "x" } as any });
-        expect.fail("Should have thrown");
-      } catch (err: any) {
-        expect(err.name).toBe("SchemaValidationError");
-      }
-
-      const [doc] = await todos.find({});
-      expect(doc?.text).toBe("Original");
-    });
-
-    it("should throw SchemaValidationError on update() failure in strict mode", async () => {
-      registry.register("todos", TodoSchema, "strict");
-      const todos = db.collection("todos");
-
-      await todos.insert({ text: "Original", done: false });
-
-      try {
-        await todos.update({ text: "Original" }, { $set: { text: "ab" } });
-        expect.fail("Should have thrown");
-      } catch (err: any) {
-        expect(err.name).toBe("SchemaValidationError");
-        expect(err.code).toBe(ErrorCode.DB_VALIDATION_FAILED);
-      }
-    });
-
-    it("should preserve _id and _createdAt metadata fields during update()", async () => {
-      registry.register("todos", TodoSchema, "strict");
-      const todos = db.collection("todos");
-
-      const insertResult = await todos.insert({ text: "Original", done: false });
-      const initialDoc = await todos.findById(insertResult.id);
-      expect(initialDoc).toBeDefined();
-
-      const initialCreatedAt = initialDoc!._createdAt;
-      const initialId = initialDoc!._id;
-
-      // Perform a valid update
-      await todos.update({ text: "Original" }, { $set: { text: "Updated" } });
-
-      const updatedDoc = await todos.findById(insertResult.id);
-      expect(updatedDoc).toBeDefined();
-      expect(updatedDoc!._id).toBe(initialId);
-      expect(updatedDoc!._createdAt).toBe(initialCreatedAt);
-      expect(updatedDoc!._updatedAt).toBeGreaterThanOrEqual(initialCreatedAt);
     });
   });
 
-  describe("Remote Sync (SyncEngine)", () => {
-    let registry: ValidatorRegistry;
-    let sync: SyncEngine;
-    let db: DbClient;
-    let network: NetworkManager;
-    let auth: AuthManager;
+  // ── update ────────────────────────────────────────────────────────────────
 
-    const UserSchema = z.object({
-      username: z.string().min(3),
-      age: z.number(),
+  describe("update()", () => {
+    it("should succeed when updating with valid partial data", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
+      await users.insert({ name: "Eve", age: 28 });
+
+      const count = await users.update({ name: "Eve" }, { $set: { age: 29 } });
+      expect(count).toBe(1);
     });
 
-    beforeEach(() => {
-      registry = new ValidatorRegistry();
-      registry.register("users", UserSchema, "strict");
+    it("should throw ZerithValidationError when updating with invalid data", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
+      await users.insert({ name: "Frank", age: 22 });
 
-      const config = createTestConfig();
-      db = new DbClient(config);
-      auth = new AuthManager(config);
-      network = new NetworkManager(config, auth);
-      sync = new SyncEngine(config, db, network, registry);
+      try {
+        await users.update(
+          { name: "Frank" },
+          { $set: { age: "not-a-number" } as unknown as Partial<UserDoc> }
+        );
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        expect(err.name).toBe("ZerithValidationError");
+      }
+    });
+  });
+
+  // ── no schema ─────────────────────────────────────────────────────────────
+
+  describe("collections without a schema", () => {
+    it("should insert any shape without validation errors", async () => {
+      // No .withSchema() call — plain collection
+      const items = db.collection<{ x: number }>("untyped");
+      const result = await items.insert({ x: 1 });
+      expect(result.id).toBeDefined();
     });
 
-    afterEach(async () => {
-      await db.dispose();
-      await sync.dispose();
-      await network.dispose();
+    it("should update without validation errors when no schema is attached", async () => {
+      const items = db.collection<{ v: number }>("vals");
+      const { id } = await items.insert({ v: 10 });
+      const count = await items.update({ _id: id } as never, { $set: { v: 20 } });
+      expect(count).toBe(1);
     });
+  });
 
-    it("should validate remote updates and emit validation:error without blocking merge", async () => {
-      const errorSpy = vi.fn();
-      sync.on("validation:error", errorSpy);
+  // ── ZerithValidationError surface area ────────────────────────────────────
 
-      const doc = sync.getDoc("users");
-      const dataMap = doc.getMap("users");
+  describe("ZerithValidationError", () => {
+    it("should have a meaningful toString()", async () => {
+      const users = db.collection<UserDoc>("users").withSchema(userSchema);
 
-      // Use Y.applyUpdate with a simple set operation
-      // Instead of remote doc, just manually call applyRemoteUpdate with an update
-      // that we know will change a key.
-      const tempDoc = new Y.Doc();
-      const tempMap = tempDoc.getMap("users");
-      const invalidData = { username: "bo", age: "young" };
-      tempMap.set("user-remote", invalidData);
-      const update = Y.encodeStateAsUpdate(tempDoc);
+      let err: any = null;
+      try {
+        await users.insert({ name: 0 as unknown as string, age: "x" as unknown as number });
+      } catch (e) {
+        err = e;
+      }
 
-      await sync.applyRemoteUpdate("users", update, "peer-123");
-
-      // Convergence
-      expect(dataMap.get("user-remote")).toEqual(invalidData);
-
-      // Validation error
-      expect(errorSpy).toHaveBeenCalled();
-    });
-
-    it("should only validate CHANGED keys in a multi-document update", async () => {
-      const doc = sync.getDoc("users");
-      const dataMap = doc.getMap("users");
-
-      // Initial valid data
-      dataMap.set("user-1", { username: "alice", age: 30 });
-
-      const validateSpy = vi.spyOn(registry, "validateRemote");
-
-      // Create update that adds user-2 but NOT user-1
-      const tempDoc = new Y.Doc();
-      const tempMap = tempDoc.getMap("users");
-      tempMap.set("user-2", { username: "bob", age: 40 });
-      const update = Y.encodeStateAsUpdate(tempDoc);
-
-      await sync.applyRemoteUpdate("users", update, "peer-1");
-
-      // Should have only validated the newly added user-2
-      expect(validateSpy).toHaveBeenCalledTimes(1);
-      expect(validateSpy).toHaveBeenCalledWith(
-        "users",
-        expect.objectContaining({ username: "bob" })
-      );
+      expect(err).not.toBeNull();
+      expect(err.name).toBe("ZerithValidationError");
+      const str = err.toString();
+      expect(str).toContain("ZerithValidationError");
+      expect(str).toContain("name");
     });
   });
 });

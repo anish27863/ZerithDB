@@ -10,20 +10,135 @@ import type {
   UpdateSpec,
   ValidatorRegistry,
 } from "zerithdb-core";
-
-import { ZerithDBError, ErrorCode } from "zerithdb-core";
+import { ZerithDBError, ErrorCode, ZerithValidationError } from "zerithdb-core";
 import { wrapIDBOperation } from "./internal/wrap-idb-operation.js";
 import { EventEmitter } from "zerithdb-core";
 import type { BackupExportOptions, BackupSnapshot } from "./backup.js";
+import { GraphClient } from "./graph-client.js";
+import type { GraphNode, GraphEdge } from "zerithdb-core";
+/**
+ * Minimal interface for an opt-in schema validator (e.g. a Zod schema).
+ * Kept loosely typed so `zod` itself is an optional peer dependency.
+ */
+export interface ZerithSchema<T> {
+  parse(data: unknown): T;
+}
 
+/**
+ * A handle to a single named collection within the ZerithDB local database.
+ * All operations are async and backed by IndexedDB.
+ */
 export class CollectionClient<T extends Record<string, any> = Record<string, any>> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private schema: ZerithSchema<T> | null = null;
+
   constructor(
     private readonly dbClient: DbClient,
     private readonly collectionName: string
   ) {}
 
+  private async checkBiometric(operationDescription: string): Promise<void> {
+    if (this.auth?.biometric?.isBiometricRequiredForDB()) {
+      const authorized = await this.auth.biometric.promptBiometric(
+        `Authorize sensitive database operation: ${operationDescription} in collection "${this.collectionName}"`
+      );
+      if (!authorized) {
+        throw new ZerithDBError(
+          ErrorCode.AUTH_SIGN_FAILED,
+          "Database operation cancelled or biometric authentication failed."
+        );
+      }
+    }
+  }
+
+  /**
+   * Subscribe to changes in the collection.
+   * Uses Dexie's liveQuery to reactively notify when documents change.
+   *
+   * @param callback - Function called with the updated list of all documents
+   * @returns An unsubscribe function
+   */
+  subscribe(callback: (documents: Document<T>[]) => void): () => void {
+    const observable = liveQuery(() => this.find());
+    const subscription = observable.subscribe({
+      next: (docs) => callback(docs),
+      error: (err) => console.error(`Error in collection subscription:`, err),
+    });
+    return () => subscription.unsubscribe();
+  }
+
+  /**
+   * Attach a Zod (or compatible) schema to this collection for opt-in validation.
+   * Returns `this` so calls can be chained directly after {@link DbClient.collection}.
+   *
+   * Validation runs before every `insert`, `insertMany`, and `update` call.
+   * Collections without a schema continue to work exactly as before.
+   *
+   * @param schema - Any object with a `parse(data): T` method (e.g. a Zod schema)
+   * @returns The same `CollectionClient` instance (fluent API)
+   *
+   * @example
+   * ```typescript
+   * import { z } from "zod";
+   * const userSchema = z.object({ name: z.string(), age: z.number() });
+   * const users = app.db("users").withSchema(userSchema);
+   * await users.insert({ name: "Alice", age: 30 }); // validated ✓
+   * ```
+   */
+  withSchema(schema: ZerithSchema<T>): this {
+    this.schema = schema;
+    return this;
+  }
+
+  /**
+   * Validates `data` against the attached schema (if any).
+   * Throws {@link ZerithValidationError} on failure.
+   * @internal
+   */
+  private validateData(data: unknown, context: string): void {
+    if (!this.schema) return;
+
+    // For updates, we try to use a partial version of the schema if it's a Zod schema.
+    // This allows $set payload to only contain a subset of fields.
+    let schemaToUse = this.schema;
+    if (context.startsWith("update") && typeof (this.schema as any).partial === "function") {
+      schemaToUse = (this.schema as any).partial();
+    }
+
+    try {
+      schemaToUse.parse(data);
+    } catch (err: unknown) {
+      // Check for Zod-shaped error (has `.errors` array)
+      if (
+        err !== null &&
+        typeof err === "object" &&
+        "errors" in err &&
+        Array.isArray((err as { errors: unknown }).errors)
+      ) {
+        throw ZerithValidationError.fromZodError(
+          err as {
+            errors: ReadonlyArray<{ path: ReadonlyArray<string | number>; message: string }>;
+          },
+          `"${this.collectionName}" — ${context}`
+        );
+      }
+      // Re-throw unknown validation errors as-is
+      throw err;
+    }
+  }
+
+  /**
+   * Insert a new document into the collection.
+   * Automatically assigns `_id`, `_createdAt`, and `_updatedAt`.
+   */
   async insert(document: T): Promise<InsertResult> {
-    const table = await this.getTable();
+    if (document === null || document === undefined) {
+      throw new ZerithDBError(ErrorCode.DB_WRITE_FAILED, "Document cannot be null or undefined");
+    }
+    await this.checkBiometric("Insert Document");
+
+    // Validate before writing — throws ZerithValidationError on failure
+    this.validateData(document, "insert");
     const now = Date.now();
     const id = uuidv7();
 
@@ -45,7 +160,22 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
   }
 
   async insertMany(documents: T[]): Promise<InsertResult[]> {
-    const table = await this.getTable();
+    if (!Array.isArray(documents) || documents.length === 0) {
+      throw new ZerithDBError(ErrorCode.DB_WRITE_FAILED, "Documents must be a non-empty array");
+    }
+    await this.checkBiometric("Bulk Insert Documents");
+    
+    // Validate each document before writing
+    for (let i = 0; i < documents.length; i++) {
+      const doc = documents[i];
+      if (doc === null || doc === undefined) {
+        throw new ZerithDBError(
+          ErrorCode.DB_WRITE_FAILED,
+          "Documents array cannot contain null or undefined"
+        );
+      }
+      this.validateData(doc, `insertMany[${i}]`);
+    }
     const now = Date.now();
 
     const docs = documents.map((doc) => ({
@@ -87,7 +217,23 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
   }
 
   async update(filter: QueryFilter<T>, spec: UpdateSpec<T>): Promise<number> {
-    const table = await this.getTable();
+    if (
+      !spec ||
+      Object.keys(spec).length === 0 ||
+      ((!spec.$set || Object.keys(spec.$set).length === 0) &&
+        (!spec.$unset || Object.keys(spec.$unset).length === 0))
+    ) {
+      throw new ZerithDBError(
+        ErrorCode.DB_WRITE_FAILED,
+        "Update spec cannot be empty. Must provide non-empty $set or $unset."
+      );
+    }
+    await this.checkBiometric("Update Documents");
+
+    // Validate the $set payload against the schema (if attached)
+    if (spec.$set !== undefined) {
+      this.validateData(spec.$set, "update.$set");
+    }
     return wrapIDBOperation(
       ErrorCode.DB_WRITE_FAILED,
       `Failed to update documents in "${this.collectionName}"`,

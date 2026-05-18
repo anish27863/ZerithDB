@@ -49,24 +49,13 @@ transport?: "auto" | "websocket" | "polling";
   transport?: "auto" | "websocket" | "polling";
 
   /**
-   * Per-collection merge policies for conflict resolution.
-   * Defaults to 'lww' (Last-Writer-Wins) if not specified.
+   * Configuration for high-latency or low-latency non-persistent ephemeral state.
    */
-  mergePolicies?: Record<string, "lww" | "crdt" | ((local: any, remote: any) => any)>;
-
-  /**
-   * Configuration options for low-latency ephemeral sync state.
-   */
-  ephemeral?: EphemeralConfig;
-}
-
-export interface EphemeralConfig {
-  /** Delay in ms to throttle ephemeral broadcasts. @default 0 */
-  throttleMs?: number;
-  /** Interval in ms to prune stale peer states. @default 5000 */
-  cleanupIntervalMs?: number;
-  /** Delay in ms after which a peer is considered stale. @default 30000 */
-  staleAfterMs?: number;
+  ephemeral?: {
+    cleanupIntervalMs?: number;
+    throttleMs?: number;
+    staleAfterMs?: number;
+  };
 }
 
 export interface AuthConfig {

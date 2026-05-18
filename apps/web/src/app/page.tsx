@@ -111,8 +111,11 @@ export default function LandingPage() {
             </motion.div>
             <span className="font-semibold text-xl tracking-tight">ZerithDB</span>
           </div>
-          <nav className="hidden lg:flex items-center gap-5 xl:gap-8 text-sm font-medium text-muted-foreground">
-            <Link href="/docs" className="hover:text-black dark:hover:text-white transition-colors font-medium">
+          <nav
+            aria-label="Main navigation"
+            className="hidden lg:flex items-center gap-5 xl:gap-8 text-sm font-medium text-muted-foreground"
+          >
+            <Link href="/docs" className="hover:text-foreground transition-colors font-medium">
               Docs
             </Link>
             <Link href="/docs" className="hover:text-black dark:hover:text-white transition-colors font-medium">
@@ -156,6 +159,8 @@ export default function LandingPage() {
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 className="w-4 h-4"
+                aria-hidden="true"
+                focusable="false"
               >
                 <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
                 <path d="M9 18c-4.51 2-5-2-7-2" />
@@ -191,6 +196,7 @@ export default function LandingPage() {
                 animate={{ y: 0 }}
                 exit={{ y: -10 }}
                 transition={{ duration: 0.25 }}
+                aria-label="Mobile navigation"
                 className="flex flex-col gap-4 px-6 py-5 text-sm font-medium text-muted-foreground"
               >
                 <Link
@@ -400,21 +406,39 @@ export default function LandingPage() {
           transition={{ duration: 0.8, delay: 0.35 }}
           className="mt-8 flex flex-col items-center gap-4"
         >
-          <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-            Get started in 30 seconds
-          </p>
-
-          <div className="flex flex-col sm:flex-row items-center gap-3 rounded-2xl border border-border bg-background/80 px-4 py-3 shadow-sm backdrop-blur transition-colors duration-300">
-            <code className="text-sm sm:text-base font-mono text-foreground">
-              npm install zerithdb-sdk
-            </code>
-
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText("npm install zerithdb-sdk");
-                toast.success("Copied install command");
-              }}
-              className="rounded-lg border border-border px-3 py-1 text-sm font-medium hover:bg-muted transition-colors"
+          <Link
+            href="#get-started"
+            className="group flex items-center gap-2 bg-black text-white px-6 py-3.5 rounded-xl font-medium text-base hover:bg-gray-800 transition-all shadow-sm w-full sm:w-auto justify-center"
+          >
+            Start Building
+            <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+          </Link>
+          <Link
+            href="#playground"
+            className="flex items-center gap-2 bg-blue-50 text-blue-700 border border-blue-100 px-6 py-3.5 rounded-xl font-medium text-base hover:bg-blue-100 transition-all w-full sm:w-auto justify-center shadow-sm"
+          >
+            <Zap className="w-4 h-4 animate-pulse" />
+            Try Playground
+          </Link>
+          <a
+            href="https://github.com/Zerith-Labs/ZerithDB"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 bg-background text-foreground border border-border px-6 py-3.5 rounded-xl font-medium text-base hover:bg-muted transition-all transition-colors duration-300 w-full sm:w-auto justify-center shadow-sm"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="w-5 h-5"
+              aria-hidden="true"
+              focusable="false"
             >
               Copy
             </button>
@@ -945,6 +969,8 @@ export default function LandingPage() {
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 className="w-5 h-5"
+                aria-hidden="true"
+                focusable="false"
               >
                 <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
                 <path d="M9 18c-4.51 2-5-2-7-2" />
@@ -960,7 +986,13 @@ export default function LandingPage() {
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 flex items-center justify-center">
-              <img src="/logo.svg" alt="ZerithDB Logo" className="w-full h-full" />
+              <Image
+                src="/logo.svg"
+                alt="ZerithDB Logo"
+                width={32}
+                height={32}
+                className="w-full h-full"
+              />
             </div>
             <span className="font-semibold text-foreground text-lg">ZerithDB</span>
           </div>
@@ -1023,8 +1055,8 @@ export default function LandingPage() {
             </motion.button>
           )}
         </AnimatePresence>
+        <SocialGraph />
       </footer>
-      <SocialGraph />
     </main>
   );
 }

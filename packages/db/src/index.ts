@@ -10,4 +10,5 @@ export type {
   DropboxBackupTargetOptions,
   LocalCloudBackupOptions,
 } from "./backup.js";
+export type { ZerithSchema } from "./db-client.js";
 export { GraphClient, GraphTraversal } from "./graph-client.js";

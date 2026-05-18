@@ -1,9 +1,4 @@
-/** Conflict resolution merge policy option */
-export type MergePolicy = "lww" | "crdt" | ((local: any, remote: any) => any);
-
-import type { MediaStreamMetadata } from "./network.js";
-
-/** A sync update payload containing document data and peer origin. */
+/** A CRDT update payload to be applied or transmitted to peers. */
 export interface SyncUpdate {
   /** Name of the collection this update belongs to */
   collectionName: string;
@@ -111,6 +106,25 @@ export interface MediaStreamMetadata {
   audioMuted: boolean;
   videoMuted: boolean;
   tracks: MediaStreamTrackMetadata[];
+  updatedAt: number;
+}
+
+export type MediaStreamKind = "camera" | "screen" | "custom";
+
+export interface MediaStreamMetadata {
+  streamId: string;
+  peerId: string;
+  kind: MediaStreamKind;
+  audioMuted: boolean;
+  videoMuted: boolean;
+  tracks: Array<{
+    trackId: string;
+    kind: "audio" | "video";
+    label: string;
+    enabled: boolean;
+    muted: boolean;
+    readyState: string;
+  }>;
   updatedAt: number;
 }
 

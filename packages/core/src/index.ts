@@ -4,10 +4,7 @@
 export { EventEmitter } from "./internal/event-emitter.js";
 export { ZerithDBError, ErrorCode, SchemaValidationError } from "zerithdb-errors";
 export { Logger } from "./internal/logger.js";
-
-export { ValidatorRegistry } from "./internal/validator-registry.js";
-export type { RegisteredValidator, ValidationResult } from "./internal/validator-registry.js";
-
+export { ZerithValidationError } from "./internal/validation-error.js";
 export type {
   ZerithDBConfig,
   SyncConfig,
@@ -29,33 +26,25 @@ export type {
   FindResult,
   CollectionOptions,
 } from "./types/db.js";
-export type {
-  SchemaLike,
-  SafeParseResult,
-  ValidationMode,
-  CollectionSchemaOptions,
-} from "./types/validation.js";
-
-export type {
-  PeerId,
-  PeerInfo,
-  RoomId,
-  NetworkMessage,
-  MediaStreamKind,
-  MediaTrackMetadata,
-  MediaStreamMetadata,
-} from "./types/network.js";
+export type { PeerId, PeerInfo, RoomId, NetworkMessage } from "./types/network.js";
+export type { Identity, PublicKey, Signature } from "./types/auth.js";
 
 export type { Identity, PublicKey, Signature } from "./types/auth.js";
 export type {
   SyncUpdate,
   SyncState,
   AwarenessState,
-  SyncPlugin,
-  MergePolicy,
-  ConflictResolution,
-  SyncLog,
   EphemeralPeerState,
+  MediaStreamMetadata,
   ActiveSpeakerState,
   VideoParticipantState,
+  SyncPlugin,
+  MediaStreamKind,
 } from "./types/sync.js";
+export type {
+  GraphNode,
+  GraphEdge,
+  GraphNodeId,
+  EdgeLabel,
+  GraphTraversalResult,
+} from "./types/graph.js";
